@@ -16,7 +16,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/custom'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v7.0.1
         with:
           persist-credentials: false
       - name: Install validation tools
@@ -31,9 +31,123 @@ jobs:
         run: |
           bash tests/test_reinstall_cmdline.sh
           bash tests/test_reinstall_btrfs_layout.sh
+          sh tests/test_reinstall_btrfs_target_config.sh
           bash tests/test_windows_serialize.sh
       - name: Lint GitHub Actions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+  distro-contract:
+    name: Linux container contract (${{ matrix.distro }})
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - distro: Alpine
+            image: alpine:3.24.2
+          - distro: Debian
+            image: debian:trixie-slim
+          - distro: Ubuntu
+            image: ubuntu:24.04
+          - distro: Kali
+            image: kalilinux/kali-rolling:latest
+          - distro: Arch Linux
+            image: archlinux:base
+          - distro: Gentoo
+            image: gentoo/stage3:latest
+          - distro: Nix tooling
+            image: nixos/nix:2.35.2
+          - distro: openSUSE
+            image: opensuse/tumbleweed:latest
+          - distro: Fedora
+            image: fedora:43
+          - distro: AlmaLinux
+            image: almalinux:10
+          - distro: Rocky Linux
+            image: rockylinux:10
+          - distro: Oracle Linux
+            image: oraclelinux:10
+          - distro: Anolis OS
+            image: openanolis/anolisos:23.4
+          - distro: OpenCloudOS
+            image: opencloudos/opencloudos9-minimal:latest
+          - distro: openEuler
+            image: openeuler/openeuler:24.03
+          - distro: AOSC OS
+            image: aosc/aosc-os:buildkit
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test shared target configuration helpers in ${{ matrix.distro }}
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            --entrypoint /bin/sh \
+            "$DISTRO_IMAGE" \
+            tests/test_reinstall_btrfs_target_config.sh
+
+  btrfs-install-dry-run:
+    name: Btrfs install dry-run
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/custom') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create Btrfs targets for supported distributions
+        run: |
+          mkdir -p artifacts/reinstall-btrfs
+          docker run --privileged --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$GITHUB_WORKSPACE/artifacts/reinstall-btrfs:/artifacts:rw" \
+            --workdir /workspace \
+            --entrypoint /bin/bash \
+            ubuntu:24.04 -euc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+                btrfs-progs dosfstools e2fsprogs util-linux coreutils
+              bash tests/reinstall_btrfs_reboot_dry_run.sh prepare-all /artifacts
+            '
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reinstall-btrfs-target-trees
+          path: artifacts/reinstall-btrfs/
+          if-no-files-found: error
+          retention-days: 1
+
+  btrfs-post-reboot-dry-run:
+    name: Btrfs post-reboot validation
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/custom') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: btrfs-install-dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v8.0.1
+        with:
+          name: reinstall-btrfs-target-trees
+          path: artifacts/reinstall-btrfs/
+      - name: Remount target trees in a fresh privileged container
+        run: |
+          docker run --privileged --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$GITHUB_WORKSPACE/artifacts/reinstall-btrfs:/artifacts:rw" \
+            --workdir /workspace \
+            --entrypoint /bin/bash \
+            ubuntu:24.04 -euc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+                btrfs-progs dosfstools e2fsprogs util-linux coreutils
+              bash tests/reinstall_btrfs_reboot_dry_run.sh verify-all /artifacts
+            '
 
   smoke:
     name: Installer smoke (${{ matrix.os }})
@@ -47,7 +161,7 @@ jobs:
     env:
       REINSTALL_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v7.0.1
         with:
           persist-credentials: false
       - name: Run Linux smoke checks

@@ -2081,15 +2081,10 @@ install_nixos() {
 
     nix_kernel_params=$(get_ttys console=)
     if [ "$filesystem" = btrfs ]; then
-        nix_kernel_params="$nix_kernel_params rootflags=subvol=$btrfs_root_subvolume,$btrfs_root_options"
-        nix_btrfs_config=$(cat <<EOF
-boot.supportedFilesystems = [ "btrfs" ];
-boot.initrd.supportedFilesystems = [ "btrfs" ];
-environment.systemPackages = [ pkgs.btrfs-progs ];
-fileSystems."/".options = lib.mkForce [ "subvol=$btrfs_root_subvolume" "$btrfs_root_options" ];
-fileSystems."/boot".options = lib.mkForce [ "subvol=$btrfs_boot_subvolume" "$btrfs_root_options" ];
-EOF
-        )
+        nix_rootflags=$(reinstall_btrfs_kernel_rootflags "$btrfs_root_subvolume" "$btrfs_root_options")
+        nix_kernel_params="$nix_kernel_params $nix_rootflags"
+        nix_btrfs_config=$(reinstall_btrfs_nixos_config_snippet \
+            "$btrfs_root_subvolume" "$btrfs_boot_subvolume" "$btrfs_root_options")
     fi
 
     if [ -e /os/swapfile ] && $keep_swap; then
@@ -2255,8 +2250,8 @@ EOF
     done
     # 去除多余的空格
     alls=$(echo "$alls" | xargs)
-    if [ "$filesystem" = btrfs ] && ! echo "$alls" | grep -wq btrfs; then
-        alls="$alls btrfs"
+    if [ "$filesystem" = btrfs ]; then
+        alls=$(reinstall_btrfs_nixos_add_initrd_module "$alls")
     fi
 
     # boot.initrd.availableKernelModules = [ "ata_piix" "uhci_hcd" "virtio_pci" "sr_mod" "virtio_blk" ];
@@ -2744,8 +2739,10 @@ EOF
         uuid=$(chroot $os_dir findmnt -rno UUID /)
         mkdir -p $os_dir/etc/dracut.conf.d
         if [ "$filesystem" = btrfs ]; then
+            gentoo_rootflags=$(reinstall_btrfs_kernel_rootflags \
+                "$btrfs_root_subvolume" "$btrfs_root_options")
             cat <<EOF >$os_dir/etc/dracut.conf.d/00-installkernel.conf
-kernel_cmdline=" root=UUID=$uuid rootflags=subvol=$btrfs_root_subvolume,$btrfs_root_options "
+kernel_cmdline=" root=UUID=$uuid $gentoo_rootflags "
 add_dracutmodules+=" btrfs "
 EOF
         else
@@ -2867,7 +2864,9 @@ EOF
     fi
     ttys_cmdline=$(get_ttys console=)
     if [ "$filesystem" = btrfs ]; then
-        ttys_cmdline="$ttys_cmdline rootflags=subvol=$btrfs_root_subvolume,$btrfs_root_options"
+        grub_rootflags=$(reinstall_btrfs_kernel_rootflags \
+            "$btrfs_root_subvolume" "$btrfs_root_options")
+        ttys_cmdline="$ttys_cmdline $grub_rootflags"
     fi
     echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX $ttys_cmdline\" >>$file
     chroot $os_dir grub-mkconfig -o /boot/grub/grub.cfg
@@ -6507,50 +6506,22 @@ mount_part_basic_layout() {
 }
 
 write_btrfs_fstab() {
-    local os_dir=$1 root_uuid efi_uuid fstab_file temp_dir filtered_fstab new_fstab
-    fstab_file="$os_dir/etc/fstab"
+    local os_dir=$1 root_uuid efi_uuid
     root_uuid=$(blkid -s UUID -o value "$btrfs_device") || return 1
     [ -n "$root_uuid" ] || return 1
     if is_efi; then
         efi_uuid=$(blkid -s UUID -o value "$btrfs_efi_device") || return 1
         [ -n "$efi_uuid" ] || return 1
     fi
-
-    temp_dir=$(mktemp -d /tmp/reinstall-btrfs-fstab.XXXXXX) || return 1
-    filtered_fstab="$temp_dir/filtered"
-    new_fstab="$temp_dir/new"
-
-    mkdir -p "$os_dir/etc"
-    if [ -f "$fstab_file" ]; then
-        awk 'NF < 2 || $1 ~ /^#/ || ($2 != "/" && $2 != "/boot" && $2 != "/efi")' \
-            "$fstab_file" >"$filtered_fstab" || {
-                rm -rf "$temp_dir"
-                return 1
-            }
+    if is_efi; then
+        reinstall_btrfs_write_fstab \
+            "$os_dir" "$root_uuid" "$btrfs_root_subvolume" \
+            "$btrfs_boot_subvolume" "$btrfs_root_options" "$efi_uuid"
     else
-        : >"$filtered_fstab"
+        reinstall_btrfs_write_fstab \
+            "$os_dir" "$root_uuid" "$btrfs_root_subvolume" \
+            "$btrfs_boot_subvolume" "$btrfs_root_options"
     fi
-    if ! cat "$filtered_fstab" >"$new_fstab"; then
-        rm -rf "$temp_dir"
-        return 1
-    fi
-    {
-        printf 'UUID=%s / btrfs defaults,compress=zstd,subvol=%s 0 0\n' \
-            "$root_uuid" "$btrfs_root_subvolume"
-        printf 'UUID=%s /boot btrfs defaults,compress=zstd,subvol=%s 0 0\n' \
-            "$root_uuid" "$btrfs_boot_subvolume"
-        if is_efi; then
-            printf 'UUID=%s /efi vfat umask=077 0 2\n' "$efi_uuid"
-        fi
-    } >>"$new_fstab" || {
-        rm -rf "$temp_dir"
-        return 1
-    }
-    if ! mv "$new_fstab" "$fstab_file"; then
-        rm -rf "$temp_dir"
-        return 1
-    fi
-    rm -rf "$temp_dir"
 }
 
 mount_part_for_iso_installer() {
