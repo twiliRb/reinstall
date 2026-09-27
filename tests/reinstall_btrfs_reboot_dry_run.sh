@@ -160,7 +160,7 @@ verify_state() {
 
     _root_fs=$(findmnt -rn -o FSTYPE --target "$_target")
     _root_options=$(findmnt -rn -o OPTIONS --target "$_target")
-    _boot_subvolume=$(btrfs subvolume show "$_target/boot" | awk -F ': ' '$1 == "Name" { print $2 }')
+    _boot_options=$(findmnt -rn -o OPTIONS --target "$_target/boot")
     _boot_attributes=$(lsattr -d "$_target/boot" | awk '{ print $1 }')
     _boot_file_attributes=$(lsattr -d "$_target/boot/vmlinuz-reinstall-ci" | awk '{ print $1 }')
     [ "$_root_fs" = btrfs ] || fail "root is not mounted as Btrfs after simulated reboot"
@@ -169,7 +169,10 @@ verify_state() {
     *,subvol=@,*|*,subvol=/@,*) ;;
     *) fail "root mount lost subvol=@ (findmnt reported: $_root_options)" ;;
     esac
-    [ "$_boot_subvolume" = @boot ] || fail "/boot is not mounted from @boot"
+    case ",$_boot_options," in
+    *,subvol=@boot,*|*,subvol=/@boot,*) ;;
+    *) fail "/boot is not mounted from @boot (findmnt reported: $_boot_options)" ;;
+    esac
     case $_boot_attributes in *m*) ;; *) fail "/boot lost its no-compression attribute" ;; esac
     case $_boot_file_attributes in *m*) ;; *) fail "/boot files did not inherit no-compression" ;; esac
     [ -s "$_target/etc/reinstall-ci-state" ] || fail "root target files did not persist"
