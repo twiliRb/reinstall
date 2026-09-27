@@ -10,7 +10,7 @@ set -eE
 
 # 用于判断 reinstall.sh 和 trans.sh 是否兼容
 # shellcheck disable=SC2034
-SCRIPT_VERSION=4BACD833-A585-23BA-6CBB-9AA4E08E0005
+SCRIPT_VERSION=98FEEC8E-6B0F-4B27-B44C-6CB717809E47
 
 TRUE=0
 FALSE=1
@@ -87,6 +87,15 @@ if ! [ -r "$cmdline_helper" ]; then
     error_and_exit "Missing pinned command-line parser."
 fi
 . "$cmdline_helper"
+
+btrfs_layout_helper=/reinstall-btrfs-layout.sh
+if ! [ -r "$btrfs_layout_helper" ]; then
+    btrfs_layout_helper="$(dirname "$0")/lib/reinstall-btrfs-layout.sh"
+fi
+if ! [ -r "$btrfs_layout_helper" ]; then
+    error_and_exit "Missing pinned Btrfs layout planner."
+fi
+. "$btrfs_layout_helper"
 
 windows_helper=/windows-serialize.sh
 if ! [ -r "$windows_helper" ]; then
@@ -564,9 +573,30 @@ get_all_disks() {
 }
 
 extract_env_from_cmdline() {
+    filesystem=ext4
     # 提取 finalos/extra 到变量
     reinstall_cmdline_load_file /proc/cmdline all ||
         error_and_exit "Invalid command-line configuration."
+
+    if reinstall_validate_filesystem "$filesystem" "$distro"; then
+        :
+    else
+        filesystem_status=$?
+        case "$filesystem_status" in
+        1) error_and_exit "Invalid filesystem in command-line configuration." ;;
+        2) error_and_exit "Btrfs is supported only for Arch, Gentoo, NixOS, and AOSC." ;;
+        esac
+    fi
+
+    if [ "$filesystem" = btrfs ]; then
+        apk add e2fsprogs btrfs-progs
+        e2fsprogs_version=$(mke2fs -V 2>&1 | sed -n '1s/^[^0-9]*\([0-9][0-9.]*\).*/\1/p')
+        if ! reinstall_e2fsprogs_supports_nocompress "$e2fsprogs_version"; then
+            error_and_exit "Btrfs /boot compression exclusion requires e2fsprogs 1.46.2 or newer."
+        fi
+        check_btrfs_nocompress_support ||
+            error_and_exit "The running kernel or btrfs-progs cannot set and inherit the Btrfs no-compression attribute."
+    fi
 
     # 如果空白则设置默认值
     if [ "$distro" = windows ]; then
@@ -577,6 +607,48 @@ extract_env_from_cmdline() {
     ssh_port=${ssh_port:-22}
     rdp_port=${rdp_port:-3389}
     web_port=${web_port:-80}
+}
+
+check_btrfs_nocompress_support() {
+    local probe_dir probe_image probe_mount
+    local attrs file_attrs
+
+    probe_dir=$(mktemp -d /tmp/reinstall-btrfs-nocompress.XXXXXX) || return 1
+    probe_image="$probe_dir/probe.img"
+    probe_mount="$probe_dir/mnt"
+    mkdir -p "$probe_mount"
+    if ! truncate -s 256M "$probe_image" || ! mkfs.btrfs -q -f "$probe_image"; then
+        rm -rf "$probe_dir"
+        return 1
+    fi
+    if ! mount -o loop "$probe_image" "$probe_mount"; then
+        rm -rf "$probe_dir"
+        return 1
+    fi
+
+    if ! mkdir "$probe_mount/boot" || ! chattr +m "$probe_mount/boot"; then
+        if umount "$probe_mount"; then
+            rm -rf "$probe_dir"
+        fi
+        return 1
+    fi
+    attrs=$(lsattr -d "$probe_mount/boot" 2>/dev/null | awk 'NR == 1 {print $1}')
+    if ! touch "$probe_mount/boot/probe"; then
+        if umount "$probe_mount"; then
+            rm -rf "$probe_dir"
+        fi
+        return 1
+    fi
+    file_attrs=$(lsattr -d "$probe_mount/boot/probe" 2>/dev/null | awk 'NR == 1 {print $1}')
+    if ! umount "$probe_mount"; then
+        return 1
+    fi
+    rm -rf "$probe_dir"
+
+    case "$attrs:$file_attrs" in
+    *m*:*m*) return 0 ;;
+    *) return 1 ;;
+    esac
 }
 
 ensure_service_started() {
@@ -2003,6 +2075,19 @@ install_nixos() {
         nix_substituters="nix.settings.substituters = lib.mkForce [ \"$mirror/store\" ];"
     fi
 
+    nix_kernel_params=$(get_ttys console=)
+    if [ "$filesystem" = btrfs ]; then
+        nix_kernel_params="$nix_kernel_params rootflags=subvol=$btrfs_root_subvolume,$btrfs_root_options"
+        nix_btrfs_config=$(cat <<EOF
+boot.supportedFilesystems = [ "btrfs" ];
+boot.initrd.supportedFilesystems = [ "btrfs" ];
+environment.systemPackages = [ pkgs.btrfs-progs ];
+fileSystems."/".options = lib.mkForce [ "subvol=$btrfs_root_subvolume" "$btrfs_root_options" ];
+fileSystems."/boot".options = lib.mkForce [ "subvol=$btrfs_boot_subvolume" "$btrfs_root_options" ];
+EOF
+        )
+    fi
+
     if [ -e /os/swapfile ] && $keep_swap; then
         nix_swap="swapDevices = [ { device = \"/swapfile\"; size = $swap_size; } ];"
     fi
@@ -2129,9 +2214,10 @@ EOF
     del_empty_lines <<EOF | add_space 2 | add_newline both |
 ############### Add by reinstall.sh ###############
 $nix_bootloader
+$nix_btrfs_config
 $nix_swap
 $nix_substituters
-boot.kernelParams = [ $(get_ttys console= | quote_word) ];
+boot.kernelParams = [ $(echo "$nix_kernel_params" | quote_word) ];
 $nix_users
 $nix_openssh
 $nix_frpc
@@ -2165,6 +2251,9 @@ EOF
     done
     # 去除多余的空格
     alls=$(echo "$alls" | xargs)
+    if [ "$filesystem" = btrfs ] && ! echo "$alls" | grep -wq btrfs; then
+        alls="$alls btrfs"
+    fi
 
     # boot.initrd.availableKernelModules = [ "ata_piix" "uhci_hcd" "virtio_pci" "sr_mod" "virtio_blk" ];
     nix_replace \
@@ -2650,7 +2739,14 @@ EOF
         # https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Kernel#Chroot_detection
         uuid=$(chroot $os_dir findmnt -rno UUID /)
         mkdir -p $os_dir/etc/dracut.conf.d
-        echo "kernel_cmdline=\" root=UUID=$uuid \"" >$os_dir/etc/dracut.conf.d/00-installkernel.conf
+        if [ "$filesystem" = btrfs ]; then
+            cat <<EOF >$os_dir/etc/dracut.conf.d/00-installkernel.conf
+kernel_cmdline=" root=UUID=$uuid rootflags=subvol=$btrfs_root_subvolume,$btrfs_root_options "
+add_dracutmodules+=" btrfs "
+EOF
+        else
+            echo "kernel_cmdline=\" root=UUID=$uuid \"" >$os_dir/etc/dracut.conf.d/00-installkernel.conf
+        fi
         pkgs="$pkgs sys-kernel/gentoo-kernel-bin"
 
         # 安装
@@ -2668,7 +2764,16 @@ EOF
         create_swap_if_ram_less_than 1024 $os_dir/swapfile
 
         # 挂载伪文件系统
+        if [ "$filesystem" = btrfs ]; then
+            cp_resolv_conf "$os_dir"
+        fi
         mount_pseudo_fs $os_dir
+
+        if [ "$filesystem" = btrfs ]; then
+            chroot "$os_dir" oma install --yes btrfs-progs
+            mkdir -p "$os_dir/etc/dracut.conf.d"
+            echo 'add_dracutmodules+=" btrfs "' >"$os_dir/etc/dracut.conf.d/10-btrfs.conf"
+        fi
 
         # 生成 initramfs
         chroot $os_dir update-initramfs
@@ -2757,19 +2862,29 @@ EOF
         file=$os_dir/etc/default/grub
     fi
     ttys_cmdline=$(get_ttys console=)
+    if [ "$filesystem" = btrfs ]; then
+        ttys_cmdline="$ttys_cmdline rootflags=subvol=$btrfs_root_subvolume,$btrfs_root_options"
+    fi
     echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX $ttys_cmdline\" >>$file
     chroot $os_dir grub-mkconfig -o /boot/grub/grub.cfg
 
     # fstab
     # fstab 可不写 efi 条目， systemd automount 会自动挂载
     # fstab 头部有使用说明，因此用 >>
-    local alpine_rootfs=$os_dir/alpine
-    create_alpine_rootfs_with_arch_install_scripts "$alpine_rootfs" true "$os_dir"
-    # genfstab 会用到 findmnt 等工具
-    retry 5 chroot "$alpine_rootfs" apk add util-linux
-    chroot "$alpine_rootfs" genfstab -U /parent | sed '/swap/d' >>$os_dir/etc/fstab
-    umount -R "$alpine_rootfs/parent"
-    remove_alpine_rootfs "$alpine_rootfs"
+    if [ "$filesystem" = btrfs ]; then
+        write_btrfs_fstab "$os_dir" || error_and_exit "Could not write Btrfs mount entries to fstab."
+    else
+        local alpine_rootfs=$os_dir/alpine
+        create_alpine_rootfs_with_arch_install_scripts "$alpine_rootfs" true "$os_dir"
+        # genfstab 会用到 findmnt 等工具
+        retry 5 chroot "$alpine_rootfs" apk add util-linux
+        chroot "$alpine_rootfs" genfstab -U /parent | sed '/swap/d' >>$os_dir/etc/fstab
+        umount -R "$alpine_rootfs/parent"
+        remove_alpine_rootfs "$alpine_rootfs"
+    fi
+    if [ "$distro" = aosc ] && [ "$filesystem" = btrfs ]; then
+        chroot "$os_dir" update-initramfs -u
+    fi
 
     # 删除 resolv.conf，不然 systemd-resolved 无法创建软链接
     rm_resolv_conf $os_dir
@@ -2967,12 +3082,31 @@ xda() {
     fi
 }
 
+get_btrfs_layout_plan() {
+    local boot_mode disk_size
+    if is_efi; then
+        boot_mode=efi
+    else
+        boot_mode=bios
+    fi
+    disk_size=$(get_disk_size "/dev/$xda")
+    reinstall_btrfs_layout_plan "$boot_mode" "$disk_size"
+}
+
 create_part() {
+    local btrfs_layout_plan=
+
     # 除了 dd 都会用到
     info "Create Part"
 
+    if [ "$filesystem" = btrfs ]; then
+        btrfs_layout_plan=$(get_btrfs_layout_plan) ||
+            error_and_exit "Could not calculate the Btrfs partition layout."
+    fi
+
     # 分区工具
     apk add parted e2fsprogs
+    [ "$filesystem" = btrfs ] && apk add btrfs-progs
     if is_efi; then
         apk add dosfstools
     fi
@@ -3166,41 +3300,111 @@ create_part() {
         fi
     elif [ "$distro" = alpine ] || [ "$distro" = arch ] || [ "$distro" = gentoo ] ||
         [ "$distro" = nixos ] || [ "$distro" = aosc ]; then
-        # alpine 本身关闭了 64bit ext4
-        # https://gitlab.alpinelinux.org/alpine/alpine-conf/-/blob/3.18.1/setup-disk.in?ref_type=tags#L908
-        # 而且 alpine 的 extlinux 不兼容 64bit ext4
-        [ "$distro" = alpine ] && ext4_opts="-O ^64bit" || ext4_opts=
-        if is_efi; then
-            # efi
-            parted /dev/$xda -s -- \
-                mklabel gpt \
-                mkpart '" "' fat32 1MiB 101MiB \
-                mkpart '" "' ext4 101MiB 100% \
-                set 1 boot on
+        if [ "$filesystem" = btrfs ]; then
+            local plan_record plan_number plan_role plan_fs plan_start plan_end plan_flag
+            local btrfs_table root_part_num efi_part_num root_subvolume boot_subvolume
+            local root_compression boot_policy root_device btrfs_top_level root_subvolume_id
+            local tab
+
+            btrfs_table=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "table" {print $2}')
+            root_part_num=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "root" {print $2}')
+            efi_part_num=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "esp" {print $2}')
+            root_subvolume=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $2}')
+            root_compression=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $4}')
+            boot_subvolume=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $2}')
+            boot_policy=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $4}')
+            if [ -z "$btrfs_table" ] || [ -z "$root_part_num" ] ||
+                [ -z "$root_subvolume" ] || [ -z "$boot_subvolume" ] ||
+                [ "$root_compression" != compress=zstd ] || [ "$boot_policy" != no-compression ]; then
+                error_and_exit "Invalid Btrfs layout plan."
+            fi
+
+            parted /dev/$xda -s -- mklabel "$btrfs_table"
+            tab=$(printf '\t')
+            while IFS="$tab" read -r plan_record plan_number plan_role plan_fs plan_start plan_end plan_flag; do
+                [ "$plan_record" = partition ] || continue
+                case "$plan_role" in
+                esp)
+                    parted /dev/$xda -s -- mkpart '" "' fat32 "$plan_start" "$plan_end"
+                    parted /dev/$xda -s -- set "$plan_number" esp on
+                    efi_part_num=$plan_number
+                    ;;
+                bios_grub)
+                    parted /dev/$xda -s -- mkpart '" "' "$plan_start" "$plan_end"
+                    parted /dev/$xda -s -- set "$plan_number" bios_grub on
+                    ;;
+                root)
+                    if [ "$btrfs_table" = msdos ]; then
+                        parted /dev/$xda -s -- mkpart primary btrfs "$plan_start" "$plan_end"
+                        parted /dev/$xda -s -- set "$plan_number" boot on
+                    else
+                        parted /dev/$xda -s -- mkpart '" "' btrfs "$plan_start" "$plan_end"
+                    fi
+                    root_part_num=$plan_number
+                    ;;
+                *) error_and_exit "Unknown Btrfs partition role: $plan_role" ;;
+                esac
+            done <<EOF
+$btrfs_layout_plan
+EOF
             update_part
 
-            mkfs.fat "/dev/$(xda 1)"                #1 efi
-            mkfs.ext4 -F $ext4_opts "/dev/$(xda 2)" #2 os
-        elif is_xda_gt_2t; then
-            # bios > 2t
-            parted /dev/$xda -s -- \
-                mklabel gpt \
-                mkpart '" "' ext4 1MiB 2MiB \
-                mkpart '" "' ext4 2MiB 100% \
-                set 1 bios_grub on
-            update_part
+            if [ -n "$efi_part_num" ]; then
+                mkfs.fat -n efi "/dev/$(xda "$efi_part_num")"
+            fi
+            root_device="/dev/$(xda "$root_part_num")"
+            mkfs.btrfs -f -L os "$root_device"
 
-            echo                                    #1 bios_boot
-            mkfs.ext4 -F $ext4_opts "/dev/$(xda 2)" #2 os
+            btrfs_top_level=$(mktemp -d /tmp/reinstall-btrfs-layout.XXXXXX) ||
+                error_and_exit "Could not create a temporary Btrfs mountpoint."
+            mount -t btrfs -o "subvolid=5,$root_compression" "$root_device" "$btrfs_top_level"
+            btrfs subvolume create "$btrfs_top_level/$root_subvolume"
+            btrfs subvolume create "$btrfs_top_level/$boot_subvolume"
+            case "$boot_policy" in
+            no-compression) chattr +m "$btrfs_top_level/$boot_subvolume" ;;
+            *) error_and_exit "Unsupported Btrfs boot subvolume policy: $boot_policy" ;;
+            esac
+            root_subvolume_id=$(btrfs inspect-internal rootid "$btrfs_top_level/$root_subvolume")
+            btrfs subvolume set-default "$root_subvolume_id" "$btrfs_top_level"
+            umount "$btrfs_top_level"
+            rmdir "$btrfs_top_level"
         else
-            # bios
-            parted /dev/$xda -s -- \
-                mklabel msdos \
-                mkpart primary ext4 1MiB 100% \
-                set 1 boot on
-            update_part
+            # alpine 本身关闭了 64bit ext4
+            # https://gitlab.alpinelinux.org/alpine/alpine-conf/-/blob/3.18.1/setup-disk.in?ref_type=tags#L908
+            # 而且 alpine 的 extlinux 不兼容 64bit ext4
+            [ "$distro" = alpine ] && ext4_opts="-O ^64bit" || ext4_opts=
+            if is_efi; then
+                # efi
+                parted /dev/$xda -s -- \
+                    mklabel gpt \
+                    mkpart '" "' fat32 1MiB 101MiB \
+                    mkpart '" "' ext4 101MiB 100% \
+                    set 1 boot on
+                update_part
 
-            mkfs.ext4 -F $ext4_opts "/dev/$(xda 1)" #1 os
+                mkfs.fat "/dev/$(xda 1)"                #1 efi
+                mkfs.ext4 -F $ext4_opts "/dev/$(xda 2)" #2 os
+            elif is_xda_gt_2t; then
+                # bios > 2t
+                parted /dev/$xda -s -- \
+                    mklabel gpt \
+                    mkpart '" "' ext4 1MiB 2MiB \
+                    mkpart '" "' ext4 2MiB 100% \
+                    set 1 bios_grub on
+                update_part
+
+                echo                                    #1 bios_boot
+                mkfs.ext4 -F $ext4_opts "/dev/$(xda 2)" #2 os
+            else
+                # bios
+                parted /dev/$xda -s -- \
+                    mklabel msdos \
+                    mkpart primary ext4 1MiB 100% \
+                    set 1 boot on
+                update_part
+
+                mkfs.ext4 -F $ext4_opts "/dev/$(xda 1)" #1 os
+            fi
         fi
     else
         # 安装红帽系或ubuntu
@@ -6256,22 +6460,93 @@ resize_after_install_cloud_image() {
 mount_part_basic_layout() {
     local os_dir=$1
     local efi_dir=$2
-
-    if is_efi || is_xda_gt_2t; then
-        os_part_num=2
-    else
-        os_part_num=1
-    fi
+    local layout_plan
 
     # 挂载系统分区
-    mkdir -p $os_dir
-    mount -t ext4 "/dev/$(xda $os_part_num)" $os_dir
+    mkdir -p "$os_dir"
+    if [ "$filesystem" = btrfs ]; then
+        layout_plan=$(get_btrfs_layout_plan) || error_and_exit "Could not calculate the Btrfs mount layout."
+        os_part_num=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "root" {print $2}')
+        efi_part_num=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "esp" {print $2}')
+        btrfs_root_subvolume=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $2}')
+        btrfs_root_options=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $4}')
+        btrfs_boot_subvolume=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $2}')
+        btrfs_boot_policy=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $4}')
+        if [ -z "$os_part_num" ] || [ -z "$btrfs_root_subvolume" ] ||
+            [ -z "$btrfs_boot_subvolume" ] || [ "$btrfs_root_options" != compress=zstd ] ||
+            [ "$btrfs_boot_policy" != no-compression ] || { is_efi && [ -z "$efi_part_num" ]; }; then
+            error_and_exit "Invalid Btrfs mount layout."
+        fi
+        btrfs_device="/dev/$(xda "$os_part_num")"
+        mount -t btrfs -o "subvol=$btrfs_root_subvolume,$btrfs_root_options" "$btrfs_device" "$os_dir"
+        mkdir -p "$os_dir/boot"
+        mount -t btrfs -o "subvol=$btrfs_boot_subvolume" "$btrfs_device" "$os_dir/boot"
+    else
+        if is_efi || is_xda_gt_2t; then
+            os_part_num=2
+        else
+            os_part_num=1
+        fi
+        mount -t ext4 "/dev/$(xda $os_part_num)" "$os_dir"
+    fi
 
     # 挂载 efi 分区
     if is_efi; then
-        mkdir -p $efi_dir
-        mount -t vfat -o umask=077 "/dev/$(xda 1)" $efi_dir
+        mkdir -p "$efi_dir"
+        if [ "$filesystem" = btrfs ]; then
+            btrfs_efi_device="/dev/$(xda "$efi_part_num")"
+        else
+            btrfs_efi_device="/dev/$(xda 1)"
+        fi
+        mount -t vfat -o umask=077 "$btrfs_efi_device" "$efi_dir"
     fi
+}
+
+write_btrfs_fstab() {
+    local os_dir=$1 root_uuid efi_uuid fstab_file temp_dir filtered_fstab new_fstab
+    fstab_file="$os_dir/etc/fstab"
+    root_uuid=$(blkid -s UUID -o value "$btrfs_device") || return 1
+    [ -n "$root_uuid" ] || return 1
+    if is_efi; then
+        efi_uuid=$(blkid -s UUID -o value "$btrfs_efi_device") || return 1
+        [ -n "$efi_uuid" ] || return 1
+    fi
+
+    temp_dir=$(mktemp -d /tmp/reinstall-btrfs-fstab.XXXXXX) || return 1
+    filtered_fstab="$temp_dir/filtered"
+    new_fstab="$temp_dir/new"
+
+    mkdir -p "$os_dir/etc"
+    if [ -f "$fstab_file" ]; then
+        awk 'NF < 2 || $1 ~ /^#/ || ($2 != "/" && $2 != "/boot" && $2 != "/efi")' \
+            "$fstab_file" >"$filtered_fstab" || {
+                rm -rf "$temp_dir"
+                return 1
+            }
+    else
+        : >"$filtered_fstab"
+    fi
+    if ! cat "$filtered_fstab" >"$new_fstab"; then
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    {
+        printf 'UUID=%s / btrfs defaults,compress=zstd,subvol=%s 0 0\n' \
+            "$root_uuid" "$btrfs_root_subvolume"
+        printf 'UUID=%s /boot btrfs defaults,compress=zstd,subvol=%s 0 0\n' \
+            "$root_uuid" "$btrfs_boot_subvolume"
+        if is_efi; then
+            printf 'UUID=%s /efi vfat umask=077 0 2\n' "$efi_uuid"
+        fi
+    } >>"$new_fstab" || {
+        rm -rf "$temp_dir"
+        return 1
+    }
+    if ! mv "$new_fstab" "$fstab_file"; then
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    rm -rf "$temp_dir"
 }
 
 mount_part_for_iso_installer() {

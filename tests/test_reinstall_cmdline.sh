@@ -4,6 +4,36 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/lib/reinstall-cmdline.sh"
 
+# The optional filesystem selector defaults to ext4, while Btrfs is limited to
+# the install paths that know how to configure its root and boot subvolumes.
+reinstall_validate_filesystem ext4 arch
+reinstall_validate_filesystem btrfs arch
+reinstall_validate_filesystem btrfs gentoo
+reinstall_validate_filesystem btrfs nixos
+reinstall_validate_filesystem btrfs aosc
+if reinstall_validate_filesystem btrfs debian; then
+    printf 'accepted Btrfs on an unsupported distro\n' >&2
+    exit 1
+else
+    [[ $? == 2 ]]
+fi
+if reinstall_validate_filesystem xfs arch; then
+    printf 'accepted an unsupported filesystem value\n' >&2
+    exit 1
+else
+    [[ $? == 1 ]]
+fi
+for supported_e2fsprogs_version in 1.46.2 1.46.3 1.47.0 2.0.0; do
+    reinstall_e2fsprogs_supports_nocompress "$supported_e2fsprogs_version"
+done
+for unsupported_e2fsprogs_version in 1.46.1 1.45.6 1.0.99 invalid 1.46; do
+    if reinstall_e2fsprogs_supports_nocompress "$unsupported_e2fsprogs_version"; then
+        printf 'accepted e2fsprogs without chattr +m support: %s\n' \
+            "$unsupported_e2fsprogs_version" >&2
+        exit 1
+    fi
+done
+
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -15,11 +45,14 @@ port_arg=$(reinstall_cmdline_serialize extra_ssh_port '2222')
 source_sha=0123456789abcdef0123456789abcdef01234567
 confhome_arg=$(reinstall_cmdline_serialize extra_confhome \
     "https://raw.githubusercontent.com/twiliRb/reinstall/$source_sha")
-printf '%s\n' "root=/dev/vda $username_arg $port_arg $confhome_arg" >"$tmpdir/cmdline"
+filesystem_arg=$(reinstall_cmdline_serialize extra_filesystem btrfs)
+printf '%s\n' "root=/dev/vda $username_arg $port_arg $confhome_arg $filesystem_arg" >"$tmpdir/cmdline"
 
 username=
 ssh_port=
 confhome=
+filesystem=ext4
+[[ "$filesystem" == ext4 ]]
 reinstall_cmdline_load_file "$tmpdir/cmdline" extra
 
 if [[ "$username" != "A user 'with quotes' \"double\" \$HOME \`touch $marker\` & 雪" ]]; then
@@ -28,6 +61,7 @@ if [[ "$username" != "A user 'with quotes' \"double\" \$HOME \`touch $marker\` &
 fi
 [[ "$ssh_port" == 2222 ]]
 [[ "$confhome" == "https://raw.githubusercontent.com/twiliRb/reinstall/$source_sha" ]]
+[[ "$filesystem" == btrfs ]]
 [[ ! -e "$marker" ]]
 
 # Every finalos_* field emitted by setos() must survive a two-stage reboot.

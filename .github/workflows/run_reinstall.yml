@@ -27,9 +27,10 @@ jobs:
         run: find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
       - name: Run ShellCheck
         run: find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck --severity=error
-      - name: Test command-line and Windows serializers
+      - name: Test command-line, Btrfs layout, and Windows serializers
         run: |
           bash tests/test_reinstall_cmdline.sh
+          bash tests/test_reinstall_btrfs_layout.sh
           bash tests/test_windows_serialize.sh
       - name: Lint GitHub Actions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7

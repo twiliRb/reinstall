@@ -176,10 +176,13 @@ bash reinstall.sh anolis      7|8|23
 - `--ssh-key KEY` 设置 SSH 登录公钥，[格式如下](#--ssh-key)。当使用公钥时，密码为空
 - `--ssh-port PORT` 修改 SSH 端口
 - `--web-port PORT` 修改 Web 端口（安装期间观察日志用）
+- `--filesystem ext4|btrfs` 选择根文件系统，默认 `ext4`。首版 Btrfs 仅支持 Arch、Gentoo、NixOS、AOSC：`/` 使用 `@` 子卷并启用 `compress=zstd`，`/boot` 使用 `@boot` 子卷且关闭压缩；UEFI 的 ESP 挂载在 `/efi`
 - `--frpc-config PATH` 添加 frpc 内网穿透，参数填配置文件的本地路径或 HTTP 链接
 - `--no-cloud-kernel` 不使用云内核，避免部分机器黑屏/花屏，适用于 Debian、Ubuntu、Alpine、openSUSE
 - `--hold 1` 仅重启到安装环境，不运行安装，用于 SSH 登录验证网络连通性
 - `--hold 2` 安装结束后不重启，用于 SSH 登录修改系统内容，Debian/Kali 会挂载在 `/target`，其它系统会挂载在 `/os`
+
+> Btrfs 安装会在分区前检查内核对 `/boot` no-compression 属性的支持，需要 e2fsprogs 1.46.2 或更新版本提供的 `chattr +m`。
 
 > [!TIP]
 >

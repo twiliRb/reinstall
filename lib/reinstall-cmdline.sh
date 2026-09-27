@@ -16,6 +16,50 @@ reinstall_shell_quote() {
     printf "'"
 }
 
+# Return 1 for an unknown filesystem value and 2 when Btrfs is unavailable for
+# the selected distro. ext4 remains the default on every existing path.
+reinstall_validate_filesystem() {
+    local _reinstall_filesystem=$1 _reinstall_distro=$2
+    case "$_reinstall_filesystem" in
+    ext4) return 0 ;;
+    btrfs)
+        case "$_reinstall_distro" in
+        arch | gentoo | nixos | aosc) return 0 ;;
+        *) return 2 ;;
+        esac
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+# The Btrfs no-compression inode flag is exposed by e2fsprogs chattr since
+# 1.46.2. Accept only a plain three-part numeric version string.
+reinstall_e2fsprogs_supports_nocompress() {
+    local _reinstall_version=$1
+    local _reinstall_major _reinstall_minor _reinstall_patch _reinstall_rest
+
+    case "$_reinstall_version" in
+    '' | *[!0-9.]* | .* | *..* | *.) return 1 ;;
+    esac
+    _reinstall_major=${_reinstall_version%%.*}
+    [ "$_reinstall_major" != "$_reinstall_version" ] || return 1
+    _reinstall_rest=${_reinstall_version#*.}
+    _reinstall_minor=${_reinstall_rest%%.*}
+    [ "$_reinstall_minor" != "$_reinstall_rest" ] || return 1
+    _reinstall_patch=${_reinstall_rest#*.}
+    case "$_reinstall_patch" in *.* | '') return 1 ;; esac
+
+    if [ "$_reinstall_major" -gt 1 ]; then
+        return 0
+    fi
+    [ "$_reinstall_major" -eq 1 ] || return 1
+    if [ "$_reinstall_minor" -gt 46 ]; then
+        return 0
+    fi
+    [ "$_reinstall_minor" -eq 46 ] || return 1
+    [ "$_reinstall_patch" -ge 2 ]
+}
+
 # web_path is generated as an HTTP path, then also used beneath a static root.
 # Accept only safe path segments so it cannot escape /tmp/web or contain shell
 # syntax when supplied through an old or manually edited kernel command line.
@@ -64,7 +108,7 @@ reinstall_cmdline_apply_token() {
         extra_addrs | extra_allow_ping | extra_cloud_image | extra_confhome | extra_deb_mirror | \
         extra_elts | extra_force_boot_mode | extra_force_cn | extra_force_old_windows_setup | \
         extra_hold | extra_kernel | extra_link_grub_dir | extra_localtest | extra_main_disk | \
-        extra_mirrorlist | extra_no_auto_drivers | extra_no_cloud_kernel | extra_rdp_port | \
+        extra_filesystem | extra_mirrorlist | extra_no_auto_drivers | extra_no_cloud_kernel | extra_rdp_port | \
         extra_source_id | extra_ssh_port | extra_username | extra_web_path | extra_web_port) ;;
     *) return 0 ;;
     esac
@@ -87,6 +131,7 @@ reinstall_cmdline_apply_token() {
     extra_force_boot_mode) force_boot_mode=$_reinstall_value ;;
     extra_force_cn) force_cn=$_reinstall_value ;;
     extra_force_old_windows_setup) force_old_windows_setup=$_reinstall_value ;;
+    extra_filesystem) filesystem=$_reinstall_value ;;
     extra_hold) hold=$_reinstall_value ;;
     extra_kernel) kernel=$_reinstall_value ;;
     extra_link_grub_dir) link_grub_dir=$_reinstall_value ;;

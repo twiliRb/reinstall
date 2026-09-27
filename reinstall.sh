@@ -9,7 +9,7 @@ set -eE
 confhome=
 
 # 用于判断 reinstall.sh 和 trans.sh 是否兼容
-SCRIPT_VERSION=4BACD833-A585-23BA-6CBB-9AA4E08E0005
+SCRIPT_VERSION=98FEEC8E-6B0F-4B27-B44C-6CB717809E47
 
 # 记录要用到的 windows 程序，运行时输出删除 \r
 WINDOWS_EXES='cmd powershell wmic reg diskpart netsh bcdedit mountvol'
@@ -109,6 +109,7 @@ Usage: $reinstall_____ anolis      7|8|23
                        [--ssh-port    PORT]
                        [--web-port    PORT]
                        [--frpc-config PATH]
+                       [--filesystem  ext4|btrfs] (Btrfs: Arch/Gentoo/NixOS/AOSC)
 
                        For Windows Only:
                        [--allow-ping]
@@ -3574,6 +3575,10 @@ build_extra_cmdline() {
         fi
     done
 
+    if [ "$filesystem" = btrfs ]; then
+        extra_cmdline+=" $(reinstall_cmdline_serialize extra_filesystem "$filesystem")"
+    fi
+
     # Values are base64 encoded so the bootloader sees each as one inert word.
     if [ -n "$finalos_mirrorlist" ]; then
         extra_cmdline+=" $(reinstall_cmdline_serialize extra_mirrorlist "$finalos_mirrorlist")"
@@ -4386,7 +4391,7 @@ EOF
         # echo "wget --no-check-certificate -O- $confhome/trans.sh | /bin/ash" >\$sysroot/etc/local.d/trans.start
         # wget --no-check-certificate -O \$sysroot/etc/local.d/trans.start $confhome/trans.sh
         cp /trans.sh \$sysroot/etc/local.d/trans.start
-        cp /reinstall-cmdline.sh /windows-serialize.sh \$sysroot/
+        cp /reinstall-cmdline.sh /reinstall-btrfs-layout.sh /windows-serialize.sh \$sysroot/
         chmod a+x \$sysroot/etc/local.d/trans.start
         ln -s /etc/init.d/local \$sysroot/etc/runlevels/default/
 
@@ -4453,7 +4458,10 @@ This script is outdated, please download reinstall.sh again.
 
     curl -Lo $initrd_dir/initrd-network.sh $confhome/initrd-network.sh
     curl -Lo "$initrd_dir/reinstall-cmdline.sh" "$confhome/lib/reinstall-cmdline.sh"
+    curl -Lo "$initrd_dir/reinstall-btrfs-layout.sh" "$confhome/lib/reinstall-btrfs-layout.sh"
     curl -Lo "$initrd_dir/windows-serialize.sh" "$confhome/lib/windows-serialize.sh"
+    [ -s "$initrd_dir/reinstall-btrfs-layout.sh" ] ||
+        error_and_exit "Downloaded pinned Btrfs layout planner is empty."
     chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh
 
     # 保存配置
@@ -4911,6 +4919,7 @@ if is_secure_boot_enabled; then
 fi
 
 # 整理参数
+filesystem=ext4
 long_opts=
 for o in ci installer debug minimal no-cloud-kernel no-auto-drivers allow-ping force-cn help \
     add-driver: \
@@ -4933,6 +4942,7 @@ for o in ci installer debug minimal no-cloud-kernel no-auto-drivers allow-ping f
     frpc-conf: frpc-config: \
     target-disk: \
     force-boot-mode: \
+    filesystem: \
     force-old-windows-setup:; do
     [ -n "$long_opts" ] && long_opts+=,
     long_opts+=$o
@@ -4956,6 +4966,10 @@ while true; do
         commit=$2
         shift 2
         ;;
+    --filesystem)
+        filesystem=$2
+        shift 2
+        ;;
     --)
         shift
         verify_os_name "$@"
@@ -4977,6 +4991,15 @@ init_basearch
 init_confhome
 curl -fL "$confhome/lib/reinstall-cmdline.sh" -o "$tmp/reinstall-cmdline.sh"
 . "$tmp/reinstall-cmdline.sh"
+if reinstall_validate_filesystem "$filesystem" "$distro"; then
+    :
+else
+    filesystem_status=$?
+    case "$filesystem_status" in
+    1) error_and_exit "Invalid --filesystem value: $filesystem (expected ext4 or btrfs)." ;;
+    2) error_and_exit "--filesystem=btrfs is supported only for Arch, Gentoo, NixOS, and AOSC." ;;
+    esac
+fi
 init_bootloader_facts
 
 if [ "$distro" = reset ]; then
@@ -5000,6 +5023,10 @@ while true; do
         ;;
     --commit)
         commit=$2
+        shift 2
+        ;;
+    --filesystem)
+        filesystem=$2
         shift 2
         ;;
     --ci)
