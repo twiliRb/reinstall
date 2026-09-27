@@ -56,7 +56,7 @@ jobs:
           sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x ubuntu
           sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian
           sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian --ci
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x netboot.xyz
+          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug netboot.xyz
           sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
           sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
           sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug reset
@@ -68,7 +68,7 @@ jobs:
           call reinstall.bat --debug --username x --password x ubuntu || exit /b 1
           call reinstall.bat --debug --username x --password x debian || exit /b 1
           call reinstall.bat --debug --username x --password x debian --ci || exit /b 1
-          call reinstall.bat --debug --username x --password x netboot.xyz || exit /b 1
+          call reinstall.bat --debug netboot.xyz || exit /b 1
           call reinstall.bat --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz || exit /b 1
           call reinstall.bat --debug --username x --password x windows --image-name="Windows Server blah" --iso https://aka.ms/HCIReleaseImage || exit /b 1
           call reinstall.bat --debug reset || exit /b 1
