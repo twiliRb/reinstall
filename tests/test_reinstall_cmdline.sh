@@ -4,6 +4,16 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/lib/reinstall-cmdline.sh"
 
+# BIOS bootloader discovery may cache the running system disk before CLI
+# options are applied. Selecting a different target must invalidate that ID.
+xda=vda
+main_disk=source-disk-id
+boot_xda=vda
+reinstall_cmdline_select_target_disk /dev/vdb
+[[ "$xda" == vdb ]]
+[[ -z "$main_disk" ]]
+[[ "$(reinstall_cmdline_bootloader_disk)" == vda ]]
+
 # The optional filesystem selector defaults to ext4, while Btrfs is limited to
 # the install paths that know how to configure its root and boot subvolumes.
 reinstall_validate_filesystem ext4 arch

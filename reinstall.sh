@@ -2664,9 +2664,12 @@ is_use_local_extlinux() {
 
 # 软 raid 时 xda 可能不是引导盘，以后再修正
 is_mbr_using_grub() {
-    find_main_disk
+    if [ -z "${boot_xda:-}" ]; then
+        find_main_disk
+        boot_xda=$xda
+    fi
     # 各发行版不一定自带 strings hexdump xxd od 命令
-    head -c 440 /dev/$xda | grep -a -iq 'GRUB'
+    head -c 440 "/dev/$(reinstall_cmdline_bootloader_disk)" | grep -a -iq 'GRUB'
 }
 
 to_upper() {
@@ -5241,7 +5244,7 @@ EOF
         shift 2
         ;;
     --target-disk)
-        xda=${2##*/dev/}
+        reinstall_cmdline_select_target_disk "$2"
         if ! [ -b "/dev/$xda" ]; then
             error_and_exit "Can't not find Disk $2."
         fi

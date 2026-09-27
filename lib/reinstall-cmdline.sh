@@ -16,6 +16,21 @@ reinstall_shell_quote() {
     printf "'"
 }
 
+# Select a CLI target after bootloader discovery, which may have cached the
+# running system's disk ID. The next find_main_disk call must resolve this
+# selected target instead.
+reinstall_cmdline_select_target_disk() {
+    xda=${1##*/dev/}
+    main_disk=
+}
+
+# Return the disk used to inspect the currently running system's BIOS boot
+# code. It remains distinct from xda after a CLI target disk is selected.
+reinstall_cmdline_bootloader_disk() {
+    [ -n "${boot_xda:-}" ] || return 1
+    printf '%s\n' "$boot_xda"
+}
+
 # Return 1 for an unknown filesystem value and 2 when Btrfs is unavailable for
 # the selected distro. ext4 remains the default on every existing path.
 reinstall_validate_filesystem() {
