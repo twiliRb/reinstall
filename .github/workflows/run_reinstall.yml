@@ -66,7 +66,7 @@ jobs:
           - distro: AlmaLinux
             image: almalinux:10
           - distro: Rocky Linux
-            image: rockylinux:10
+            image: rockylinux/rockylinux:10
           - distro: Oracle Linux
             image: oraclelinux:10
           - distro: Anolis OS

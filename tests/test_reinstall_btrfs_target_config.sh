@@ -9,22 +9,32 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 root_uuid=11111111-1111-4111-8111-111111111111
 efi_uuid=ABCD-1234
+tab=$(printf '\t')
 target_root="$tmpdir/target"
 mkdir -p "$target_root/etc"
 cat >"$target_root/etc/fstab" <<'EOF'
 # Existing unrelated target mounts must survive regeneration.
+   # /boot comments must also survive regeneration.
+# / comments must also survive regeneration.
+	# /efi comments must also survive regeneration.
 UUID=33333333-3333-4333-8333-333333333333 /home btrfs defaults,subvol=@home 0 0
 UUID=44444444-4444-4444-8444-444444444444 / btrfs defaults,subvol=@old 0 0
 UUID=44444444-4444-4444-8444-444444444444 /boot ext4 defaults 0 2
 UUID=44444444-4444-4444-8444-444444444444 /efi vfat defaults 0 2
 UUID=55555555-5555-4555-8555-555555555555 none swap defaults 0 0
 EOF
+printf 'UUID=66666666-6666-4666-8666-666666666666\t/srv\tbtrfs\tdefaults\t0\t0\n' \
+    >>"$target_root/etc/fstab"
 
 reinstall_btrfs_write_fstab "$target_root" "$root_uuid" @ @boot compress=zstd "$efi_uuid"
 expected_efi_fstab=$(cat <<EOF
 # Existing unrelated target mounts must survive regeneration.
+   # /boot comments must also survive regeneration.
+# / comments must also survive regeneration.
+	# /efi comments must also survive regeneration.
 UUID=33333333-3333-4333-8333-333333333333 /home btrfs defaults,subvol=@home 0 0
 UUID=55555555-5555-4555-8555-555555555555 none swap defaults 0 0
+UUID=66666666-6666-4666-8666-666666666666${tab}/srv${tab}btrfs${tab}defaults${tab}0${tab}0
 UUID=$root_uuid / btrfs defaults,compress=zstd,subvol=@ 0 0
 UUID=$root_uuid /boot btrfs defaults,compress=zstd,subvol=@boot 0 0
 UUID=$efi_uuid /efi vfat umask=077 0 2
@@ -33,18 +43,42 @@ EOF
 [ "$(cat "$target_root/etc/fstab")" = "$expected_efi_fstab" ]
 cp "$target_root/etc/fstab" "$tmpdir/fstab.once"
 reinstall_btrfs_write_fstab "$target_root" "$root_uuid" @ @boot compress=zstd "$efi_uuid"
-cmp -s "$tmpdir/fstab.once" "$target_root/etc/fstab"
+[ "$(cat "$tmpdir/fstab.once")" = "$(cat "$target_root/etc/fstab")" ]
 
 reinstall_btrfs_write_fstab "$target_root" "$root_uuid" @ @boot compress=zstd
 expected_bios_fstab=$(cat <<EOF
 # Existing unrelated target mounts must survive regeneration.
+   # /boot comments must also survive regeneration.
+# / comments must also survive regeneration.
+	# /efi comments must also survive regeneration.
 UUID=33333333-3333-4333-8333-333333333333 /home btrfs defaults,subvol=@home 0 0
 UUID=55555555-5555-4555-8555-555555555555 none swap defaults 0 0
+UUID=66666666-6666-4666-8666-666666666666${tab}/srv${tab}btrfs${tab}defaults${tab}0${tab}0
 UUID=$root_uuid / btrfs defaults,compress=zstd,subvol=@ 0 0
 UUID=$root_uuid /boot btrfs defaults,compress=zstd,subvol=@boot 0 0
 EOF
 )
 [ "$(cat "$target_root/etc/fstab")" = "$expected_bios_fstab" ]
+
+empty_target="$tmpdir/empty-target"
+mkdir -p "$empty_target/etc"
+: >"$empty_target/etc/fstab"
+reinstall_btrfs_write_fstab "$empty_target" "$root_uuid" @ @boot compress=zstd
+[ "$(cat "$empty_target/etc/fstab")" = \
+    "UUID=$root_uuid / btrfs defaults,compress=zstd,subvol=@ 0 0
+UUID=$root_uuid /boot btrfs defaults,compress=zstd,subvol=@boot 0 0" ]
+
+mounts_only_target="$tmpdir/mounts-only-target"
+mkdir -p "$mounts_only_target/etc"
+printf '%s\n' \
+    'UUID=44444444-4444-4444-8444-444444444444 / btrfs defaults 0 0' \
+    'UUID=44444444-4444-4444-8444-444444444444 /boot ext4 defaults 0 2' \
+    'UUID=44444444-4444-4444-8444-444444444444 /efi vfat defaults 0 2' \
+    >"$mounts_only_target/etc/fstab"
+reinstall_btrfs_write_fstab "$mounts_only_target" "$root_uuid" @ @boot compress=zstd
+[ "$(cat "$mounts_only_target/etc/fstab")" = \
+    "UUID=$root_uuid / btrfs defaults,compress=zstd,subvol=@ 0 0
+UUID=$root_uuid /boot btrfs defaults,compress=zstd,subvol=@boot 0 0" ]
 
 expected_nixos=$(cat <<'EOF'
 boot.supportedFilesystems = [ "btrfs" ];

@@ -129,11 +129,27 @@ reinstall_btrfs_write_fstab() (
     _reinstall_btrfs_filtered_fstab="$_reinstall_btrfs_temp_dir/filtered"
     _reinstall_btrfs_new_fstab="$_reinstall_btrfs_temp_dir/new"
 
+    : >"$_reinstall_btrfs_filtered_fstab" || exit 1
     if [ -f "$_reinstall_btrfs_fstab_file" ]; then
-        awk 'NF < 2 || $1 ~ /^#/ || ($2 != "/" && $2 != "/boot" && $2 != "/efi")' \
-            "$_reinstall_btrfs_fstab_file" >"$_reinstall_btrfs_filtered_fstab" || exit 1
-    else
-        : >"$_reinstall_btrfs_filtered_fstab" || exit 1
+        _reinstall_btrfs_field_ifs=$(printf ' \t')
+        while IFS= read -r _reinstall_btrfs_line || [ -n "$_reinstall_btrfs_line" ]; do
+            _reinstall_btrfs_source=
+            _reinstall_btrfs_mountpoint=
+            _reinstall_btrfs_rest=
+            IFS="$_reinstall_btrfs_field_ifs" read -r \
+                _reinstall_btrfs_source _reinstall_btrfs_mountpoint _reinstall_btrfs_rest <<EOF
+$_reinstall_btrfs_line
+EOF
+            case $_reinstall_btrfs_source in
+            \#*) printf '%s\n' "$_reinstall_btrfs_line" >>"$_reinstall_btrfs_filtered_fstab" || exit 1 ;;
+            *)
+                case $_reinstall_btrfs_mountpoint in
+                /|/boot|/efi) ;;
+                *) printf '%s\n' "$_reinstall_btrfs_line" >>"$_reinstall_btrfs_filtered_fstab" || exit 1 ;;
+                esac
+                ;;
+            esac
+        done <"$_reinstall_btrfs_fstab_file"
     fi
     cat "$_reinstall_btrfs_filtered_fstab" >"$_reinstall_btrfs_new_fstab" || exit 1
     {
