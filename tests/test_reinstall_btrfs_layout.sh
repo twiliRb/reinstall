@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/lib/reinstall-btrfs-layout.sh"
 
+# The live preflight needs full e2fsprogs chattr/lsattr support for Btrfs +m;
+# BusyBox's applets do not implement that inode attribute.
+[[ "$(reinstall_btrfs_preflight_packages)" == "e2fsprogs e2fsprogs-extra btrfs-progs" ]]
+
 two_tib=2199023255552
 
 expect_plan() {

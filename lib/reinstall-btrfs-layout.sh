@@ -1,5 +1,10 @@
 #!/bin/sh
 
+# Return the tools the live installer needs for the Btrfs preflight.
+reinstall_btrfs_preflight_packages() {
+    printf '%s\n' 'e2fsprogs e2fsprogs-extra btrfs-progs'
+}
+
 # Emit the installer-neutral Btrfs partition and subvolume plan as TSV.
 reinstall_btrfs_layout_plan() (
     [ "$#" -eq 2 ] || exit 2
