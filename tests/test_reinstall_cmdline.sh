@@ -34,6 +34,12 @@ for unsupported_e2fsprogs_version in 1.46.1 1.45.6 1.0.99 invalid 1.46; do
     fi
 done
 
+mke2fs_output=$'mke2fs 1.47.4 (5-Feb-2023)\nUsing EXT2FS Library version 1.47.4'
+[[ "$(reinstall_e2fsprogs_version_from_mke2fs_output "$mke2fs_output")" == 1.47.4 ]]
+mke2fs_old_output='mke2fs 1.46.2 (28-Feb-2021)'
+[[ "$(reinstall_e2fsprogs_version_from_mke2fs_output "$mke2fs_old_output")" == 1.46.2 ]]
+[[ -z "$(reinstall_e2fsprogs_version_from_mke2fs_output 'not mke2fs version output')" ]]
+
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 

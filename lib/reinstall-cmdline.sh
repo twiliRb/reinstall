@@ -32,6 +32,15 @@ reinstall_validate_filesystem() {
     esac
 }
 
+# Parse the first line emitted by `mke2fs -V`. The executable name contains a
+# digit, so looking for the first number in the line reports `2`, not its
+# version. Keep this a pure parser so callers can reject unsupported tools
+# before touching disks.
+reinstall_e2fsprogs_version_from_mke2fs_output() {
+    printf '%s\n' "$1" |
+        awk 'NR == 1 && $1 == "mke2fs" && $2 ~ /^[0-9][0-9.]*$/ { print $2 }'
+}
+
 # The Btrfs no-compression inode flag is exposed by e2fsprogs chattr since
 # 1.46.2. Accept only a plain three-part numeric version string.
 reinstall_e2fsprogs_supports_nocompress() {
