@@ -5,6 +5,13 @@ reinstall_btrfs_preflight_packages() {
     printf '%s\n' 'e2fsprogs e2fsprogs-extra btrfs-progs'
 }
 
+# The Alpine live system keeps kernel modules in modloop. Mounting a Btrfs
+# probe image fails with EINVAL until modloop is mounted and Btrfs is loaded.
+reinstall_btrfs_activate_kernel_support() {
+    ensure_service_started modloop
+    modprobe btrfs
+}
+
 # Emit the installer-neutral Btrfs partition and subvolume plan as TSV.
 reinstall_btrfs_layout_plan() (
     [ "$#" -eq 2 ] || exit 2

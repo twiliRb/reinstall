@@ -593,6 +593,7 @@ extract_env_from_cmdline() {
         # BusyBox's applets lack that attribute.
         # shellcheck disable=SC2046
         apk add $(reinstall_btrfs_preflight_packages)
+        reinstall_btrfs_activate_kernel_support
         e2fsprogs_version=$(reinstall_e2fsprogs_version_from_mke2fs_output "$(mke2fs -V 2>&1)")
         if ! reinstall_e2fsprogs_supports_nocompress "$e2fsprogs_version"; then
             error_and_exit "Btrfs /boot compression exclusion requires e2fsprogs 1.46.2 or newer."

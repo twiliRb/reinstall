@@ -8,6 +8,16 @@ source "$repo_root/lib/reinstall-btrfs-layout.sh"
 # BusyBox's applets do not implement that inode attribute.
 [[ "$(reinstall_btrfs_preflight_packages)" == "e2fsprogs e2fsprogs-extra btrfs-progs" ]]
 
+preflight_kernel_calls=
+ensure_service_started() {
+    preflight_kernel_calls="${preflight_kernel_calls}service:$1 "
+}
+modprobe() {
+    preflight_kernel_calls="${preflight_kernel_calls}module:$1 "
+}
+reinstall_btrfs_activate_kernel_support
+[[ "$preflight_kernel_calls" == 'service:modloop module:btrfs ' ]]
+
 two_tib=2199023255552
 
 expect_plan() {
