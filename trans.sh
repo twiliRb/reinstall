@@ -79,6 +79,24 @@ trap_err() {
     )"
 }
 
+cmdline_helper=/reinstall-cmdline.sh
+if ! [ -r "$cmdline_helper" ]; then
+    cmdline_helper="$(dirname "$0")/lib/reinstall-cmdline.sh"
+fi
+if ! [ -r "$cmdline_helper" ]; then
+    error_and_exit "Missing pinned command-line parser."
+fi
+. "$cmdline_helper"
+
+windows_helper=/windows-serialize.sh
+if ! [ -r "$windows_helper" ]; then
+    windows_helper="$(dirname "$0")/lib/windows-serialize.sh"
+fi
+if ! [ -r "$windows_helper" ]; then
+    error_and_exit "Missing pinned Windows serializer."
+fi
+. "$windows_helper"
+
 is_run_from_locald() {
     [[ "$0" = "/etc/local.d/*" ]]
 }
@@ -432,16 +450,20 @@ setup_websocketd() {
     apk add websocketd
     apk add coreutils
 
+    reinstall_validate_web_path "$web_path" || error_and_exit "Invalid web viewer path."
+    web_file="/tmp/web$web_path"
     mkdir -p /tmp/web
+    mkdir -p "$(dirname "$web_file")"
     echo 'Wrong Path' >/tmp/web/index.html
     # shellcheck disable=SC2154
-    wget $confhome/logviewer.html -O /tmp/web$web_path
+    wget "$confhome/logviewer.html" -O "$web_file"
 
     killall -q websocketd || true
     # websocketd 遇到 \n 才推送，因此要转换 \r 为 \n
+    websocket_log_script=$(reinstall_websocket_log_script)
     websocketd --port "$web_port" --loglevel=fatal --staticdir=/tmp/web \
         stdbuf -oL -eL \
-        sh -c "if [ \"\$PATH_INFO\" = \"$web_path\" ]; then tail -fn+0 /reinstall.log | tr '\r' '\n' | grep -Fiv -e password -e token; fi" &
+        sh -c "$websocket_log_script" websocketd "$web_path" /reinstall.log &
 }
 
 get_approximate_ram_size() {
@@ -477,7 +499,11 @@ setup_lighttpd() {
 get_ttys() {
     prefix=$1
     # shellcheck disable=SC2154
-    wget $confhome/ttys.sh -O- | sh -s $prefix
+    ttys_script=/tmp/reinstall-ttys.sh
+    wget "$confhome/ttys.sh" -O "$ttys_script" ||
+        error_and_exit "Failed to download pinned ttys.sh."
+    [ -s "$ttys_script" ] || error_and_exit "Downloaded pinned ttys.sh is empty."
+    sh "$ttys_script" "$prefix"
 }
 
 find_xda() {
@@ -539,15 +565,8 @@ get_all_disks() {
 
 extract_env_from_cmdline() {
     # 提取 finalos/extra 到变量
-    for prefix in finalos extra; do
-        while read -r line; do
-            if [ -n "$line" ]; then
-                key=$(echo $line | cut -d= -f1)
-                value=$(echo $line | cut -d= -f2-)
-                eval "$key='$value'"
-            fi
-        done < <(xargs -n1 </proc/cmdline | grep "^${prefix}_" | sed "s/^${prefix}_//")
-    done
+    reinstall_cmdline_load_file /proc/cmdline all ||
+        error_and_exit "Invalid command-line configuration."
 
     # 如果空白则设置默认值
     if [ "$distro" = windows ]; then
@@ -747,12 +766,19 @@ get_ra_to() {
         show_netconf | cat -n
         echo
     fi
-    eval "$1='$_ra'"
+    case "$1" in
+    ra) ra=$_ra ;;
+    *) return 2 ;;
+    esac
 }
 
 get_netconf_to() {
     case "$1" in
     slaac | dhcpv6 | rdnss | other) get_ra_to ra ;;
+    dhcpv4 | ipv4_addr | ipv4_gateway | ipv6_addr | ipv6_gateway | dhcpv6_or_slaac | \
+        ipv4_has_internet | ipv6_has_internet | should_disable_dhcpv4 | should_disable_accept_ra | \
+        should_disable_autoconf | mac_addr | ipv6_extra_addrs) ;;
+    *) return 2 ;;
     esac
 
     # shellcheck disable=SC2154
@@ -765,7 +791,25 @@ get_netconf_to() {
     *) res=$(cat /dev/netconf/$ethx/$1) ;;
     esac
 
-    eval "$1='$res'"
+    case "$1" in
+    slaac) slaac=$res ;;
+    dhcpv4) dhcpv4=$res ;;
+    dhcpv6) dhcpv6=$res ;;
+    rdnss) rdnss=$res ;;
+    other) other=$res ;;
+    ipv4_addr) ipv4_addr=$res ;;
+    ipv4_gateway) ipv4_gateway=$res ;;
+    ipv4_has_internet) ipv4_has_internet=$res ;;
+    ipv6_addr) ipv6_addr=$res ;;
+    ipv6_gateway) ipv6_gateway=$res ;;
+    ipv6_has_internet) ipv6_has_internet=$res ;;
+    dhcpv6_or_slaac) dhcpv6_or_slaac=$res ;;
+    should_disable_dhcpv4) should_disable_dhcpv4=$res ;;
+    should_disable_accept_ra) should_disable_accept_ra=$res ;;
+    should_disable_autoconf) should_disable_autoconf=$res ;;
+    mac_addr) mac_addr=$res ;;
+    ipv6_extra_addrs) ipv6_extra_addrs=$res ;;
+    esac
 }
 
 is_any_ipv4_has_internet() {
@@ -2211,7 +2255,11 @@ add_fix_eth_name_systemd_service() {
 }
 
 get_frpc_url() {
-    wget "$confhome/get-frpc-url.sh" -O- | sh -s "$@"
+    local helper=/tmp/reinstall-get-frpc-url.sh
+    wget "$confhome/get-frpc-url.sh" -O "$helper" ||
+        error_and_exit "Failed to download pinned get-frpc-url.sh."
+    [ -s "$helper" ] || error_and_exit "Downloaded pinned get-frpc-url.sh is empty."
+    sh "$helper" "$@"
 }
 
 add_frpc_systemd_service_if_need() {
@@ -3506,20 +3554,14 @@ modify_windows() {
     #    Azure 的 Windows 实例，初始用户的密码也是永不过期的
     #    管理员账号默认不会过期
     if [ "$distro" = "windows" ] && ! is_administrator_username "$username"; then
-        # 两种方法都可以，但语法很神奇
-
-        # 第二行前面不能有空格
-        cat <<EOF >$os_dir/windows-set-user-password-never-expires.bat
-wmic useraccount where name="$username" set passwordexpires=false || ^
-powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Set-LocalUser -Name '$username' -PasswordNeverExpires \$true"
+        username_base64=$(reinstall_windows_ps_base64 "$username")
+        {
+            printf 'set "REINSTALL_USERNAME_B64=%s"\n' "$username_base64"
+            cat <<'EOF'
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$user=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:REINSTALL_USERNAME_B64)); if (Get-Command Set-LocalUser -ErrorAction SilentlyContinue) { Set-LocalUser -Name $user -PasswordNeverExpires $true } else { Get-WmiObject Win32_UserAccount | Where-Object { $_.LocalAccount -and $_.Name -ceq $user } | ForEach-Object { $_.PasswordExpires=$false; $_.Put() } }"
 del "%~f0"
 EOF
-        # 第二行 || 前面必须有空格
-        cat <<EOF >$os_dir/windows-set-user-password-never-expires.bat
-wmic useraccount where name="$username" set passwordexpires=false ^
-  || powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Set-LocalUser -Name '$username' -PasswordNeverExpires \$true"
-del "%~f0"
-EOF
+        } >"$os_dir/windows-set-user-password-never-expires.bat"
         unix2dos $os_dir/windows-set-user-password-never-expires.bat
         bats="$bats windows-set-user-password-never-expires.bat"
     fi
@@ -4323,7 +4365,11 @@ modify_os_on_disk() {
                 # find: /mnt/c/swapfile.sys: Permission denied
                 # shellcheck disable=SC1090
                 # find_file_ignore_case 也在这个文件里面
-                . <(wget -O- $confhome/windows-driver-utils.sh)
+                windows_driver_utils=/tmp/reinstall-windows-driver-utils.sh
+                wget "$confhome/windows-driver-utils.sh" -O "$windows_driver_utils" ||
+                    error_and_exit "Failed to download pinned windows-driver-utils.sh."
+                [ -s "$windows_driver_utils" ] || error_and_exit "Downloaded pinned windows-driver-utils.sh is empty."
+                . "$windows_driver_utils"
                 if find_file_ignore_case /os/Windows/System32/ntoskrnl.exe >/dev/null 2>&1; then
                     # 其他地方会用到
                     is_windows() { true; }
@@ -6594,7 +6640,11 @@ install_windows() {
 
     # find_file_ignore_case 也在这个文件里面
     # shellcheck disable=SC1090
-    . <(wget -O- $confhome/windows-driver-utils.sh)
+    windows_driver_utils=/tmp/reinstall-windows-driver-utils.sh
+    wget "$confhome/windows-driver-utils.sh" -O "$windows_driver_utils" ||
+        error_and_exit "Failed to download pinned windows-driver-utils.sh."
+    [ -s "$windows_driver_utils" ] || error_and_exit "Downloaded pinned windows-driver-utils.sh is empty."
+    . "$windows_driver_utils"
 
     apk add wimlib
 
@@ -8121,15 +8171,20 @@ EOF
     download $confhome/windows.xml /tmp/autounattend.xml
     locale=$(get_selected_image_prop 'Default Language')
     use_default_rdp_port=$(is_need_change_rdp_port && echo false || echo true)
+    if is_efi; then
+        installto_partitionid=3
+    else
+        installto_partitionid=1
+    fi
 
     # 7601.24214.180801-1700.win7sp1_ldr_escrow_CLIENT_ULTIMATE_x64FRE_en-us.iso Image Name 为空
     # 将 xml Image Name 的值设为空可以正常安装
-    sed -i \
-        -e "s|%arch%|$arch|" \
-        -e "s|%image_name%|$image_name|" \
-        -e "s|%locale%|$locale|" \
-        -e "s|%use_default_rdp_port%|$use_default_rdp_port|" \
-        /tmp/autounattend.xml
+    reinstall_windows_xml_set_value /tmp/autounattend.xml '//x:component/@processorArchitecture' "$arch"
+    reinstall_windows_xml_set_value /tmp/autounattend.xml '//x:MetaData[x:Key="/IMAGE/NAME"]/x:Value' "$image_name"
+    reinstall_windows_xml_set_value /tmp/autounattend.xml '//x:PartitionID' "$installto_partitionid"
+    reinstall_windows_xml_set_value /tmp/autounattend.xml \
+        '//x:InputLocale | //x:SystemLocale | //x:UILanguage | //x:UserLocale' "$locale"
+    reinstall_windows_xml_set_value /tmp/autounattend.xml '//x:Active' "$use_default_rdp_port"
 
     # 账号密码
     if is_administrator_username "$username"; then
@@ -8138,29 +8193,24 @@ EOF
         xmlstarlet ed -L -N x="urn:schemas-microsoft-com:unattend" \
             -d "//x:LocalAccounts" \
             /tmp/autounattend.xml
-        sed -i \
-            -e "s|%enable_administrator%|1|gi" \
-            -e "s|%administrator_password%|$password_base64|gi" \
-            /tmp/autounattend.xml
+        enable_administrator=1
+        reinstall_windows_xml_set_value /tmp/autounattend.xml \
+            '//x:AdministratorPassword/x:Value' "$password_base64"
     else
         # 普通账号
         password_base64=$(get_password_windows_user_base64)
         xmlstarlet ed -L -N x="urn:schemas-microsoft-com:unattend" \
             -d "//x:AdministratorPassword" \
             /tmp/autounattend.xml
-        sed -i \
-            -e "s|%enable_administrator%|0|gi" \
-            -e "s|%user_username%|$username|gi" \
-            -e "s|%user_password%|$password_base64|gi" \
-            /tmp/autounattend.xml
+        enable_administrator=0
+        reinstall_windows_xml_set_value /tmp/autounattend.xml '//x:LocalAccount/x:Name' "$username"
+        reinstall_windows_xml_set_value /tmp/autounattend.xml \
+            '//x:LocalAccount/x:Password/x:Value' "$password_base64"
     fi
 
-    # 修改应答文件，分区配置
-    if is_efi; then
-        sed -i "s|%installto_partitionid%|3|" /tmp/autounattend.xml
-    else
-        sed -i "s|%installto_partitionid%|1|" /tmp/autounattend.xml
-    fi
+    admin_path='cmd /c "if "'"$enable_administrator"'"=="1" for %a in (Administrator Administrador Administrateur Administratör Администратор Järjestelmänvalvoja Rendszergazda) do (net user %a /active:yes && exit)"'
+    reinstall_windows_xml_set_value /tmp/autounattend.xml \
+        '//x:RunSynchronousCommand[x:Order="5"]/x:Path' "$admin_path"
 
     # vista/2008 有这行安装会报错
     if [ "$nt_ver" = 6.0 ]; then
@@ -8179,14 +8229,15 @@ EOF
         # 从镜像获取默认密钥
         setup_cfg=$(get_path_in_correct_case /os/installer/sources/inf/setup.cfg)
         key=$(del_cr <"$setup_cfg" | grep -Eix 'Value=([A-Z0-9]{5}-){4}[A-Z0-9]{5}' | cut -d= -f2 | grep .)
-        sed -i "s/%key%/$key/" /tmp/autounattend.xml
+        reinstall_windows_xml_set_value /tmp/autounattend.xml '//x:ProductKey/x:Key' "$key"
     else
         if [ -f "$(get_path_in_correct_case /os/installer/sources/ei.cfg)" ]; then
             # 镜像有 ei.cfg，删除 key 字段
-            sed -i "/%key%/d" /tmp/autounattend.xml
+            xmlstarlet ed -L -N x="urn:schemas-microsoft-com:unattend" \
+                -d '//x:ProductKey/x:Key' /tmp/autounattend.xml
         else
             # 镜像无 ei.cfg，填空白 key
-            sed -i "s/%key%//" /tmp/autounattend.xml
+            reinstall_windows_xml_set_value /tmp/autounattend.xml '//x:ProductKey/x:Key' ''
         fi
     fi
 
@@ -8584,17 +8635,13 @@ install_redhat_ubuntu() {
         grub-install --boot-directory=/os/boot /dev/$xda
     fi
 
-    # 重新整理 extra，因为grub会处理掉引号，要重新添加引号
-    extra_cmdline=''
-    for var in $(grep -o '\bextra_[^ ]*' /proc/cmdline | xargs); do
-        if [[ "$var" = "extra_main_disk=*" ]]; then
-            # 重新记录主硬盘
-            refind_main_disk
-            extra_cmdline="$extra_cmdline extra_main_disk=$main_disk"
-        else
-            extra_cmdline="$extra_cmdline $(echo $var | sed -E "s/(extra_[^=]*)=(.*)/\1='\2'/")"
-        fi
-    done
+    # Re-encode as single inert kernel words for the next boot.
+    extra_cmdline=$(reinstall_cmdline_reencode_file /proc/cmdline extra extra_main_disk) ||
+        error_and_exit "Failed to encode command-line configuration."
+    if grep -Eq '(^|[[:space:]])extra_main_disk(_b64)?=' /proc/cmdline; then
+        refind_main_disk
+        extra_cmdline="$extra_cmdline $(reinstall_cmdline_serialize extra_main_disk "$main_disk")"
+    fi
 
     # 安装红帽系时，只有最后一个有安装界面显示
     # https://anaconda-installer.readthedocs.io/en/latest/boot-options.html#console
@@ -8641,7 +8688,7 @@ install_redhat_ubuntu() {
             insmod loopback
             search --no-floppy --label --set=root installer
             loopback loop /ubuntu.iso
-            linux (loop)/casper/vmlinuz iso-scan/filename=/ubuntu.iso autoinstall noprompt noeject cloud-config-url=$ks $extra_cmdline extra_kernel=$kernel extra_source_id=$source_id --- $console_cmdline
+            linux (loop)/casper/vmlinuz iso-scan/filename=/ubuntu.iso autoinstall noprompt noeject cloud-config-url=$ks $extra_cmdline $(reinstall_cmdline_serialize extra_kernel "$kernel") $(reinstall_cmdline_serialize extra_source_id "$source_id") --- $console_cmdline
             initrd (loop)/casper/initrd
         }
 EOF
@@ -8824,6 +8871,7 @@ if [ "$1" = "update" ]; then
     info 'update script'
     # shellcheck disable=SC2154
     wget -O /trans.sh "$confhome/trans.sh"
+    [ -s /trans.sh ] || error_and_exit "Downloaded pinned trans.sh is empty."
     chmod +x /trans.sh
     exec /trans.sh
 elif [ "$1" = "alpine" ]; then

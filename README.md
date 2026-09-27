@@ -88,16 +88,10 @@
 
 ## 下载（当前系统是 <img width="20" height="20" src="https://www.kernel.org/theme/images/logos/favicon.png" /> Linux）
 
-国外服务器：
+下载命令：
 
 ```bash
-curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O ${_##*/} $_
-```
-
-国内服务器：
-
-```bash
-curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget -O ${_##*/} $_
+curl -fLO https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.sh || wget -O ${_##*/} https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.sh
 ```
 
 ## 下载（当前系统是 <img width="20" height="20" src="https://blogs.windows.com/wp-content/uploads/prod/2022/09/cropped-Windows11IconTransparent512-32x32.png" /> Windows）
@@ -113,7 +107,7 @@ curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget
 
 用 IE 下载 (先在 IE 高级设置里启用 TLS 1.2)，或者通过远程桌面，将这两个文件保存到同一个目录
 
-- <https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.bat>
+- <https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.bat>
 
 - <https://www.cygwin.com/setup-x86.exe>
 
@@ -121,16 +115,10 @@ curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget
 
 </details>
 
-国外服务器：
+下载命令：
 
 ```batch
-certutil -urlcache -f -split https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.bat
-```
-
-国内服务器：
-
-```batch
-certutil -urlcache -f -split https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.bat
+certutil -urlcache -f -split https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.bat
 ```
 
 ## 使用
@@ -708,21 +696,20 @@ bash reinstall.sh reset
 
 如果脚本出现问题，可以试下旧版本是否正常
 
-从 <https://github.com/bin456789/reinstall/commits/main> 右侧找到旧版本的 `commit_id`
+从 <https://github.com/twiliRb/reinstall/commits/custom> 右侧找到旧版本的 `commit_id`
 
 将下面脚本的 `xxxxxxxx` 替换成旧版本的 `commit_id` 并运行脚本
 
 ```bash
 commit_id=xxxxxxxx
-curl -O https://raw.githubusercontent.com/bin456789/reinstall/$commit_id/reinstall.sh || wget -O ${_##*/} $_
-sed -i "/^confhome.*main$/s/main/$commit_id/" reinstall.sh
-bash reinstall.sh ...
+curl -fLO https://raw.githubusercontent.com/twiliRb/reinstall/$commit_id/reinstall.sh || wget -O reinstall.sh https://raw.githubusercontent.com/twiliRb/reinstall/$commit_id/reinstall.sh
+bash reinstall.sh --commit "$commit_id" ...
 ```
 
 ## 如何修改脚本自用
 
 1. Fork 本仓库
-2. 修改 `reinstall.sh` 和 `reinstall.bat` 开头的 `confhome` 和 `confhome_cn`
+2. 修改 `reinstall.sh`、`reinstall.bat` 和 `lib/reinstall-cmdline.sh` 中固定的仓库所有者与仓库名
 3. 修改其它代码
 4. 下载并运行你的 `reinstall.sh` 或 `reinstall.bat`
 

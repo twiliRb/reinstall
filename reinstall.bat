@@ -2,11 +2,9 @@
 mode con cp select=437 >nul
 setlocal EnableDelayedExpansion
 
-set confhome=https://raw.githubusercontent.com/bin456789/reinstall/main
-set confhome_cn=https://cnb.cool/bin456789/reinstall/-/git/raw/main
-rem set confhome_cn=https://www.ghproxy.cc/https://raw.githubusercontent.com/bin456789/reinstall/main
+set "confhome=https://raw.githubusercontent.com/twiliRb/reinstall"
 
-set pkgs=curl,cpio,p7zip,dos2unix,jq,xz,gzip,zstd,openssl,bind-utils,libiconv,binutils
+set pkgs=curl,cpio,p7zip,dos2unix,jq,xz,gzip,zstd,openssl,ca-certificates,bind-utils,libiconv,binutils
 set cmds=curl,cpio,p7zip,dos2unix,jq,xz,gzip,zstd,openssl,nslookup,iconv,ar
 
 rem 65001 代码页会乱码
@@ -53,15 +51,6 @@ findstr /c:"loc=CN" geoip >nul
 if not errorlevel 1 (
     rem mirrors.tuna.tsinghua.edu.cn 会强制跳转 https
     set mirror=http://mirror.nju.edu.cn
-    if defined confhome_cn (
-        set confhome=!confhome_cn!
-    ) else if defined github_proxy (
-        echo !confhome! | findstr /c:"://raw.githubusercontent.com/" >nul
-        if not errorlevel 1 (
-            set confhome=!confhome:http://=https://!
-            set confhome=!confhome:https://raw.githubusercontent.com=%github_proxy%!
-        )
-    )
 ) else (
     rem 服务器在美国 equinix 机房，不是 cdn
     set mirror=http://mirrors.kernel.org
@@ -170,11 +159,26 @@ call :check_cygwin_installed || (
 rem 在c盘根目录下执行 cygpath -ua . 会得到 /cygdrive/c，因此末尾要有 /
 for /f %%a in ('%SystemDrive%\cygwin\bin\cygpath -ua ./') do set thisdir=%%a
 
-rem 下载 reinstall.sh
-if not exist reinstall.sh (
-    call :download_with_curl %confhome%/reinstall.sh %thisdir%reinstall.sh || goto :download_failed
-    call :chmod a+x %thisdir%reinstall.sh
+rem Use the workflow-provided SHA when present; otherwise resolve custom once.
+if defined REINSTALL_SOURCE_COMMIT (
+    set "source_commit=!REINSTALL_SOURCE_COMMIT!"
+) else (
+    set "commit_file=%~dp0reinstall-commit.json"
+    call :download_with_curl "https://api.github.com/repos/twiliRb/reinstall/commits/custom" "!commit_file!" || goto :source_resolve_failed
+    "%SystemDrive%\cygwin\bin\jq.exe" -er .sha "!commit_file!" > "!commit_file!.sha" || goto :source_resolve_failed
+    for /f "usebackq delims=" %%a in ("!commit_file!.sha") do set "source_commit=%%a"
+    del /q "!commit_file!" "!commit_file!.sha" 2>nul
 )
+if not defined source_commit goto :source_resolve_failed
+if "!source_commit:~39,1!"=="" goto :source_resolve_failed
+if not "!source_commit:~40,1!"=="" goto :source_resolve_failed
+echo(!source_commit!| findstr /r /x "[0-9a-f][0-9a-f]*" >nul || goto :source_resolve_failed
+set "REINSTALL_SOURCE_COMMIT=!source_commit!"
+set "confhome=https://raw.githubusercontent.com/twiliRb/reinstall/!source_commit!"
+
+rem Always replace a stale bootstrap with the pinned project version.
+call :download_with_curl "!confhome!/reinstall.sh" "!thisdir!reinstall.sh" || goto :download_failed
+call :chmod a+x "!thisdir!reinstall.sh"
 
 rem %* 无法处理 --iso https://x.com/?yyy=123
 rem 为每个参数添加引号，使参数正确传递到 bash
@@ -217,12 +221,8 @@ del /q "%~2" 2>nul
 exit /b 1
 
 :download_with_curl
-rem 加 --insecure 防止以下错误
-rem curl: (77) error setting certificate verify locations:
-rem   CAfile: /etc/ssl/certs/ca-certificates.crt
-rem   CApath: none
 echo Download: %~1 %~2
-%SystemDrive%\cygwin\bin\curl -L --insecure "%~1" -o "%~2"
+%SystemDrive%\cygwin\bin\curl -L --fail --silent --show-error "%~1" -o "%~2"
 exit /b
 
 :chmod
@@ -235,6 +235,10 @@ exit /b 1
 
 :install_cygwin_failed
 echo Failed to install Cygwin.
+exit /b 1
+
+:source_resolve_failed
+echo Unable to resolve or validate the twiliRb/reinstall custom branch.
 exit /b 1
 
 :check_cygwin_installed

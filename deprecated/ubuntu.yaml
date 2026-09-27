@@ -19,16 +19,37 @@ autoinstall:
       # https://askubuntu.com/questions/1302392/ubuntu-server-20-04-setup-stuck-at-block-probing-did-not-discover-any-disks
       mount | grep /isodevice && { losetup -d /dev/loop0; umount -l /isodevice; } || true
 
-      # 提取 extra_confhome extra_kernel
-      prefix=extra
-      for var in $(grep -o "\b${prefix}_[^ ]*" /proc/cmdline | xargs); do
-          eval "$(echo $var | sed -E "s/${prefix}_([^=]*)=(.*)/\1='\2'/")"
-      done
+      # The ISO initrd is not the project initrd, so bootstrap the pinned parser.
+      source_token=$(grep -oE 'extra_confhome_b64=[A-Za-z0-9+/=]+' /proc/cmdline | tail -n1)
+      if [ -n "$source_token" ]; then
+        source_value=$(printf '%s' "${source_token#*=}" | base64 -d 2>/dev/null) || exit 1
+      else
+        source_token=$(grep -oE 'extra_confhome=[^ ]+' /proc/cmdline | tail -n1)
+        source_value=${source_token#extra_confhome=}
+      fi
+      case "$source_value" in
+        https://raw.githubusercontent.com/twiliRb/reinstall/*)
+          source_commit=${source_value#https://raw.githubusercontent.com/twiliRb/reinstall/} ;;
+        *) echo "Missing pinned reinstall source." >&2; exit 1 ;;
+      esac
+      case "$source_commit" in *[!0-9a-f]* | '') echo "Invalid reinstall source commit." >&2; exit 1 ;; esac
+      [ "${#source_commit}" -eq 40 ] || { echo "Invalid reinstall source commit." >&2; exit 1; }
+      confhome="https://raw.githubusercontent.com/twiliRb/reinstall/$source_commit"
+      curl -fsSL "$confhome/lib/reinstall-cmdline.sh" -o /reinstall-cmdline.sh || exit 1
+
+      # Parse extra values as data, using the parser embedded in the initrd.
+      . /reinstall-cmdline.sh
+      reinstall_cmdline_load_file /proc/cmdline extra || exit 1
 
       # 生成分区信息
-      xda=$(curl -L "$confhome/get-xda.sh" | sh -s)
+      curl -fsSL "$confhome/get-xda.sh" -o /tmp/reinstall-get-xda.sh || exit 1
+      [ -s /tmp/reinstall-get-xda.sh ] || exit 1
+      xda=$(sh /tmp/reinstall-get-xda.sh) || exit 1
       export xda
-      curl -L "$confhome/deprecated/ubuntu-storage-early.sh" | sh -s
+      curl -fsSL "$confhome/deprecated/ubuntu-storage-early.sh" \
+        -o /tmp/reinstall-ubuntu-storage-early.sh || exit 1
+      [ -s /tmp/reinstall-ubuntu-storage-early.sh ] || exit 1
+      sh /tmp/reinstall-ubuntu-storage-early.sh || exit 1
 
       # 要安装的版本
       # 有的镜像只有一个版本，没有 install-sources.yaml
@@ -64,15 +85,32 @@ autoinstall:
       # 还原 DNS
       # sed -i -E 's/^#(nameserver )/\1/' /etc/resolv.conf
 
-      # 提取 extra_confhome
-      prefix=extra
-      for var in $(grep -o "\b${prefix}_[^ ]*" /proc/cmdline | xargs); do
-          eval "$(echo $var | sed -E "s/${prefix}_([^=]*)=(.*)/\1='\2'/")"
-      done
+      # Re-establish the same pinned helper source in the installer environment.
+      source_token=$(grep -oE 'extra_confhome_b64=[A-Za-z0-9+/=]+' /proc/cmdline | tail -n1)
+      if [ -n "$source_token" ]; then
+        source_value=$(printf '%s' "${source_token#*=}" | base64 -d 2>/dev/null) || exit 1
+      else
+        source_token=$(grep -oE 'extra_confhome=[^ ]+' /proc/cmdline | tail -n1)
+        source_value=${source_token#extra_confhome=}
+      fi
+      case "$source_value" in
+        https://raw.githubusercontent.com/twiliRb/reinstall/*)
+          source_commit=${source_value#https://raw.githubusercontent.com/twiliRb/reinstall/} ;;
+        *) echo "Missing pinned reinstall source." >&2; exit 1 ;;
+      esac
+      case "$source_commit" in *[!0-9a-f]* | '') echo "Invalid reinstall source commit." >&2; exit 1 ;; esac
+      [ "${#source_commit}" -eq 40 ] || { echo "Invalid reinstall source commit." >&2; exit 1; }
+      confhome="https://raw.githubusercontent.com/twiliRb/reinstall/$source_commit"
+      curl -fsSL "$confhome/lib/reinstall-cmdline.sh" -o /reinstall-cmdline.sh || exit 1
+
+      # Parse extra values as data, using the parser embedded in the initrd.
+      . /reinstall-cmdline.sh
+      reinstall_cmdline_load_file /proc/cmdline extra || exit 1
 
       # 下载合并分区脚本
       cd /target
-      curl -LO $confhome/deprecated/resize.sh
+      curl -fsSLO "$confhome/deprecated/resize.sh" || exit 1
+      [ -s /target/resize.sh ] || exit 1
 
       # 升级 cloud-init
       # curtin in-target --target=/target -- apt update

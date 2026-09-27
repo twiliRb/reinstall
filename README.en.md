@@ -88,16 +88,10 @@ The system requirements for the target system are as follows:
 
 ## Download (Current system is <img width="20" height="20" src="https://www.kernel.org/theme/images/logos/favicon.png" /> Linux)
 
-For server outside China:
+Download command:
 
 ```bash
-curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O ${_##*/} $_
-```
-
-For server inside China:
-
-```bash
-curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget -O ${_##*/} $_
+curl -fLO https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.sh || wget -O ${_##*/} https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.sh
 ```
 
 ## Download (Current system is <img width="20" height="20" src="https://blogs.windows.com/wp-content/uploads/prod/2022/09/cropped-Windows11IconTransparent512-32x32.png" /> Windows)
@@ -113,7 +107,7 @@ Due to lack of support for TLS 1.2, SHA-256, or outdated root certificates, Wind
 
 Use Internet Explorer (enable TLS 1.2 in IE's advanced settings first) to download, or use Remote Desktop to save the following two files into the same directory:
 
-- <https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.bat>
+- <https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.bat>
 
 - <https://www.cygwin.com/setup-x86.exe>
 
@@ -121,16 +115,10 @@ To use, run the downloaded `reinstall.bat`.
 
 </details>
 
-For server outside China:
+Download command:
 
 ```batch
-certutil -urlcache -f -split https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.bat
-```
-
-For server inside China:
-
-```batch
-certutil -urlcache -f -split https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.bat
+certutil -urlcache -f -split https://raw.githubusercontent.com/twiliRb/reinstall/custom/reinstall.bat
 ```
 
 ## Usage
@@ -708,21 +696,20 @@ According to the Law of Bug Conservation, fixing old bugs often introduces new o
 
 If a bug occurs, try using an older version to see if it works.
 
-Go to <https://github.com/bin456789/reinstall/commits/main> and find the old version’s `commit_id` on the right side.
+Go to <https://github.com/twiliRb/reinstall/commits/custom> and find the old version’s `commit_id` on the right side.
 
 Replace `xxxxxxxx` in the script below with the `commit_id` of an older version and run the script.
 
 ```bash
 commit_id=xxxxxxxx
-curl -O https://raw.githubusercontent.com/bin456789/reinstall/$commit_id/reinstall.sh || wget -O ${_##*/} $_
-sed -i "/^confhome.*main$/s/main/$commit_id/" reinstall.sh
-bash reinstall.sh ...
+curl -fLO https://raw.githubusercontent.com/twiliRb/reinstall/$commit_id/reinstall.sh || wget -O reinstall.sh https://raw.githubusercontent.com/twiliRb/reinstall/$commit_id/reinstall.sh
+bash reinstall.sh --commit "$commit_id" ...
 ```
 
 ## How to Modify the Script for Your Own
 
 1. Fork this repository.
-2. Modify the `confhome` and `confhome_cn` at the beginning of `reinstall.sh` and `reinstall.bat`.
+2. Update the fixed repository owner and name in `reinstall.sh`, `reinstall.bat`, and `lib/reinstall-cmdline.sh`.
 3. Make changes to the other code.
 4. Download and run your `reinstall.sh` or `reinstall.bat`."
 

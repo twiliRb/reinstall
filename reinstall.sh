@@ -6,9 +6,7 @@
 # alpine 默认没有 bash，因此 shebang 用 sh，再 exec 切换到 bash
 
 set -eE
-confhome=https://raw.githubusercontent.com/bin456789/reinstall/main
-confhome_cn=https://cnb.cool/bin456789/reinstall/-/git/raw/main
-# confhome_cn=https://www.ghproxy.cc/https://raw.githubusercontent.com/bin456789/reinstall/main
+confhome=
 
 # 用于判断 reinstall.sh 和 trans.sh 是否兼容
 SCRIPT_VERSION=4BACD833-A585-23BA-6CBB-9AA4E08E0005
@@ -192,11 +190,10 @@ curl() {
     show_url_in_args "$@" >&2
 
     # 添加 -f, --fail，不然 404 退出码也为0
-    # 32位 cygwin 已停止更新，证书可能有问题，先添加 --insecure
     # centos 7 curl 不支持 --retry-connrefused --retry-all-errors
     # 因此手动 retry
     for i in $(seq 5); do
-        if command curl --insecure --connect-timeout 10 -f "$@"; then
+        if command curl --connect-timeout 10 -f "$@"; then
             return
         else
             ret=$?
@@ -409,7 +406,7 @@ test_url_real() {
     # ${PIPESTATUS[n]} 表示第n个管道的返回值
     echo $url
     for i in $(seq 5 -1 0); do
-        if command curl --insecure --connect-timeout 10 -Lfr 0-1048575 "$url" \
+        if command curl --connect-timeout 10 -Lfr 0-1048575 "$url" \
             1> >(exec head -c 1048576 >$tmp_file) \
             2> >(exec grep -v 'curl: (23)' >&2); then
             break
@@ -3549,10 +3546,6 @@ find_grub_extlinux_cfg() {
 }
 
 # 空格、&、用户输入的网址要加引号，否则 grub 无法正确识别
-is_need_quote() {
-    [[ "$1" = *' '* ]] || [[ "$1" = *'&'* ]] || [[ "$1" = http* ]]
-}
-
 # 转换 finalos_a=1 为 finalos.a=1 ，排除 finalos_mirrorlist
 build_finalos_cmdline() {
     if vars=$(compgen -v finalos_); then
@@ -3560,9 +3553,7 @@ build_finalos_cmdline() {
             value=${!key}
             key=${key#finalos_}
             if [ -n "$value" ] && [ $key != "mirrorlist" ]; then
-                is_need_quote "$value" &&
-                    finalos_cmdline+=" finalos_$key='$value'" ||
-                    finalos_cmdline+=" finalos_$key=$value"
+                finalos_cmdline+=" $(reinstall_cmdline_serialize "finalos_$key" "$value")"
             fi
         done
     fi
@@ -3579,17 +3570,15 @@ build_extra_cmdline() {
         username ssh_port rdp_port web_port web_path allow_ping; do
         value=${!key}
         if [ -n "$value" ]; then
-            is_need_quote "$value" &&
-                extra_cmdline+=" extra_$key='$value'" ||
-                extra_cmdline+=" extra_$key=$value"
+            extra_cmdline+=" $(reinstall_cmdline_serialize "extra_$key" "$value")"
         fi
     done
 
-    # 指定最终安装系统的 mirrorlist，链接有&，在grub中是特殊字符，所以要加引号
+    # Values are base64 encoded so the bootloader sees each as one inert word.
     if [ -n "$finalos_mirrorlist" ]; then
-        extra_cmdline+=" extra_mirrorlist='$finalos_mirrorlist'"
+        extra_cmdline+=" $(reinstall_cmdline_serialize extra_mirrorlist "$finalos_mirrorlist")"
     elif [ -n "$nextos_mirrorlist" ]; then
-        extra_cmdline+=" extra_mirrorlist='$nextos_mirrorlist'"
+        extra_cmdline+=" $(reinstall_cmdline_serialize extra_mirrorlist "$nextos_mirrorlist")"
     fi
 
     # cloudcone 特殊处理
@@ -3600,7 +3589,8 @@ build_extra_cmdline() {
 
 echo_tmp_ttys() {
     if false; then
-        curl -L $confhome/ttys.sh | sh -s "console="
+        curl -fL "$confhome/ttys.sh" -o "$tmp/ttys.sh"
+        sh "$tmp/ttys.sh" console=
     else
         case "$basearch" in
         x86_64) echo "console=ttyS0,115200n8 console=tty0" ;;
@@ -3975,6 +3965,8 @@ EOF
     # 因此改成在这里下载
     curl -LO "$confhome/get-xda.sh"
     curl -LO "$confhome/ttys.sh"
+    [ -s "$initrd_dir/get-xda.sh" ] || error_and_exit "Downloaded pinned get-xda.sh is empty."
+    [ -s "$initrd_dir/ttys.sh" ] || error_and_exit "Downloaded pinned ttys.sh is empty."
     if [ -n "$frpc_config" ]; then
         curl -LO "$confhome/get-frpc-url.sh"
         curl -LO "$confhome/frpc.service"
@@ -4279,13 +4271,37 @@ get_ip_conf_cmd() {
 
     sh=/initrd-network.sh
     if is_found_ipv4_netconf && is_found_ipv6_netconf && [ "$ipv4_mac" = "$ipv6_mac" ]; then
-        echo "'$sh' '$ipv4_mac' '$ipv4_addr' '$ipv4_gateway' '$ipv6_addr' '$ipv6_gateway' '$is_in_china' '$ipv6_extra_addrs'"
+        printf '%s %s %s %s %s %s %s %s\n' \
+            "$(reinstall_shell_quote "$sh")" \
+            "$(reinstall_shell_quote "$ipv4_mac")" \
+            "$(reinstall_shell_quote "$ipv4_addr")" \
+            "$(reinstall_shell_quote "$ipv4_gateway")" \
+            "$(reinstall_shell_quote "$ipv6_addr")" \
+            "$(reinstall_shell_quote "$ipv6_gateway")" \
+            "$(reinstall_shell_quote "$is_in_china")" \
+            "$(reinstall_shell_quote "$ipv6_extra_addrs")"
     else
         if is_found_ipv4_netconf; then
-            echo "'$sh' '$ipv4_mac' '$ipv4_addr' '$ipv4_gateway' '' '' '$is_in_china' ''"
+            printf '%s %s %s %s %s %s %s %s\n' \
+                "$(reinstall_shell_quote "$sh")" \
+                "$(reinstall_shell_quote "$ipv4_mac")" \
+                "$(reinstall_shell_quote "$ipv4_addr")" \
+                "$(reinstall_shell_quote "$ipv4_gateway")" \
+                "$(reinstall_shell_quote '')" \
+                "$(reinstall_shell_quote '')" \
+                "$(reinstall_shell_quote "$is_in_china")" \
+                "$(reinstall_shell_quote '')"
         fi
         if is_found_ipv6_netconf; then
-            echo "'$sh' '$ipv6_mac' '' '' '$ipv6_addr' '$ipv6_gateway' '$is_in_china' '$ipv6_extra_addrs'"
+            printf '%s %s %s %s %s %s %s %s\n' \
+                "$(reinstall_shell_quote "$sh")" \
+                "$(reinstall_shell_quote "$ipv6_mac")" \
+                "$(reinstall_shell_quote '')" \
+                "$(reinstall_shell_quote '')" \
+                "$(reinstall_shell_quote "$ipv6_addr")" \
+                "$(reinstall_shell_quote "$ipv6_gateway")" \
+                "$(reinstall_shell_quote "$is_in_china")" \
+                "$(reinstall_shell_quote "$ipv6_extra_addrs")"
         fi
     fi
 }
@@ -4370,6 +4386,7 @@ EOF
         # echo "wget --no-check-certificate -O- $confhome/trans.sh | /bin/ash" >\$sysroot/etc/local.d/trans.start
         # wget --no-check-certificate -O \$sysroot/etc/local.d/trans.start $confhome/trans.sh
         cp /trans.sh \$sysroot/etc/local.d/trans.start
+        cp /reinstall-cmdline.sh /windows-serialize.sh \$sysroot/
         chmod a+x \$sysroot/etc/local.d/trans.start
         ln -s /etc/init.d/local \$sysroot/etc/runlevels/default/
 
@@ -4435,6 +4452,8 @@ This script is outdated, please download reinstall.sh again.
     fi
 
     curl -Lo $initrd_dir/initrd-network.sh $confhome/initrd-network.sh
+    curl -Lo "$initrd_dir/reinstall-cmdline.sh" "$confhome/lib/reinstall-cmdline.sh"
+    curl -Lo "$initrd_dir/windows-serialize.sh" "$confhome/lib/windows-serialize.sh"
     chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh
 
     # 保存配置
@@ -4473,8 +4492,9 @@ This script is outdated, please download reinstall.sh again.
 
     # 添加自定义 windows 驱动
     if [ "$distro" = windows ] && [ -n "$custom_infs" ]; then
-        # shellcheck disable=SC1090
-        . <(curl -L $confhome/windows-driver-utils.sh)
+        curl -fL "$confhome/windows-driver-utils.sh" -o "$tmp/windows-driver-utils.sh"
+        [ -s "$tmp/windows-driver-utils.sh" ] || error_and_exit "Downloaded pinned windows-driver-utils.sh is empty."
+        . "$tmp/windows-driver-utils.sh"
         echo "$custom_infs" | while read -r inf; do
             parse_inf_and_cp_driever "$inf" "$initrd_dir/custom_drivers" "$basearch_alt" true
         done
@@ -4619,33 +4639,22 @@ init_basearch() {
 }
 
 init_confhome() {
-    # 设置 confhome
-    # 未测试
-    if false && [[ "$confhome" = http*://raw.githubusercontent.com/* ]]; then
-        repo=$(echo $confhome | cut -d/ -f4,5)
-        branch=$(echo $confhome | cut -d/ -f6)
-        # 避免脚本更新时，文件不同步造成错误
-        if [ -z "$commit" ]; then
-            commit=$(curl -L https://api.github.com/repos/$repo/git/refs/heads/$branch |
-                grep '"sha"' | grep -Eo '[0-9a-f]{40}')
+    local resolved_commit=${commit:-}
+
+    if [ -z "$resolved_commit" ]; then
+        if ! resolved_commit=$(curl -fsSL \
+            https://api.github.com/repos/twiliRb/reinstall/commits/custom |
+            sed -nE 's/^[[:space:]]*"sha":[[:space:]]*"([0-9a-f]{40})",?$/\1/p' | head -n 1); then
+            error_and_exit "Unable to resolve twiliRb/reinstall custom branch."
         fi
-        # shellcheck disable=SC2001
-        confhome=$(echo "$confhome" | sed "s/main$/$commit/")
     fi
 
-    # 设置国内代理
-    # 要在使用 wmic 前设置，否则国内机器会从国外源下载 wmic.ps1
-    # gitee 不支持ipv6
-    # jsdelivr 有12小时缓存
-    # https://github.com/XIU2/UserScript/blob/master/GithubEnhanced-High-Speed-Download.user.js#L31
-    if is_in_china; then
-        if [ -n "$confhome_cn" ]; then
-            confhome=$confhome_cn
-        elif [ -n "$github_proxy" ] && [[ "$confhome" = http*://raw.githubusercontent.com/* ]]; then
-            confhome=${confhome/http:\/\//https:\/\/}
-            confhome=${confhome/https:\/\/raw.githubusercontent.com/$github_proxy}
-        fi
-    fi
+    resolved_commit=$(printf '%s' "$resolved_commit" | tr 'A-F' 'a-f')
+    case "$resolved_commit" in *[!0-9a-f]* | '') error_and_exit "Invalid reinstall source commit." ;; esac
+    [ "${#resolved_commit}" -eq 40 ] || error_and_exit "Invalid reinstall source commit."
+
+    commit=$resolved_commit
+    confhome="https://raw.githubusercontent.com/twiliRb/reinstall/$commit"
 }
 
 remove_exist_reinstall_efi_dir() {
@@ -4935,12 +4944,17 @@ if ! ORIGINAL_OPTS=$(getopt -n $0 -o "h,x" --long "$long_opts" -- "$@"); then
 fi
 
 # 第一遍扫描，验证要安装的系统和版本
+commit=${REINSTALL_SOURCE_COMMIT:-}
 eval set -- "$ORIGINAL_OPTS"
 while true; do
     case "$1" in
     -x | --debug)
         set -x
         shift
+        ;;
+    --commit)
+        commit=$2
+        shift 2
         ;;
     --)
         shift
@@ -4961,6 +4975,8 @@ done
 mkdir_clear "$tmp"
 init_basearch
 init_confhome
+curl -fL "$confhome/lib/reinstall-cmdline.sh" -o "$tmp/reinstall-cmdline.sh"
+. "$tmp/reinstall-cmdline.sh"
 init_bootloader_facts
 
 if [ "$distro" = reset ]; then

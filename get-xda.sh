@@ -10,7 +10,15 @@ get_all_disks() {
 get_xda() {
     # 如果没找到 main_disk 或 xda
     # 返回假的值，防止意外地格式化全部盘
-    eval "$(grep -o 'extra_main_disk=[^ ]*' /proc/cmdline | sed 's/^extra_//')"
+    main_disk=
+    for token in $(grep -oE 'extra_main_disk(_b64)?=[^ ]*' /proc/cmdline); do
+        case "$token" in
+        extra_main_disk_b64=*)
+            main_disk=$(printf '%s' "${token#*=}" | base64 -d 2>/dev/null) || return 1
+            ;;
+        extra_main_disk=*) main_disk=${token#*=} ;;
+        esac
+    done
 
     if [ -z "$main_disk" ]; then
         echo 'MAIN_DISK_NOT_FOUND'
