@@ -1,7 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 $installer = Join-Path $PSScriptRoot '..\reinstall.bat'
-$tracePrefix = '__REINSTALL_XTRACE__ '
+$tracePrefix = '@REINSTALL_XTRACE@ '
+$tracePattern = '^@+REINSTALL_XTRACE@ '
 $env:PS4 = $tracePrefix
 $cases = @(
     @{ Name = 'AlmaLinux'; Arguments = @('--debug', '--username', 'x', '--password', 'x', 'almalinux') },
@@ -22,7 +23,7 @@ foreach ($case in $cases) {
         $status = $LASTEXITCODE
         if ($status -eq 0) {
             Write-Output "PASS $($case.Name)"
-            $visibleOutput = @(Get-Content -LiteralPath $log | Where-Object { -not $_.StartsWith($tracePrefix, [System.StringComparison]::Ordinal) })
+            $visibleOutput = @(Get-Content -LiteralPath $log | Where-Object { $_ -notmatch $tracePattern })
             if ($visibleOutput.Count -gt 0) {
                 Write-Output "OUTPUT $($case.Name)"
                 $visibleOutput | Write-Output

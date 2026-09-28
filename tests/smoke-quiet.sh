@@ -10,7 +10,7 @@ run_smoke_check() {
 
     if "$@" >"$log" 2>&1; then
         printf 'PASS %s\n' "$name"
-        sed '/^__REINSTALL_XTRACE__ /d' "$log" >"$visible_log"
+        sed -E '/^@+REINSTALL_XTRACE@ /d' "$log" >"$visible_log"
         if [[ -s "$visible_log" ]]; then
             printf 'OUTPUT %s\n' "$name"
             cat "$visible_log"
