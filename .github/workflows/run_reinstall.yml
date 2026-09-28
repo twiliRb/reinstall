@@ -178,14 +178,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           source tests/smoke-quiet.sh
-          run_smoke_check 'AlmaLinux' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x almalinux
-          run_smoke_check 'Ubuntu' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x ubuntu
-          run_smoke_check 'Debian' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian
-          run_smoke_check 'Debian cloud-init with network modes' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
-          run_smoke_check 'netboot.xyz' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug netboot.xyz
-          run_smoke_check 'Debian image' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
-          run_smoke_check 'Windows image' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
-          run_smoke_check 'Reset' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug reset
+          run_smoke_check 'AlmaLinux' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x almalinux
+          run_smoke_check 'Ubuntu' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x ubuntu
+          run_smoke_check 'Debian' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian
+          run_smoke_check 'Debian cloud-init with network modes' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
+          run_smoke_check 'netboot.xyz' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug netboot.xyz
+          run_smoke_check 'Debian image' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
+          run_smoke_check 'Windows image' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
+          run_smoke_check 'Reset' sudo env PS4='__REINSTALL_XTRACE__ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug reset
       - name: Run Windows smoke checks
         if: runner.os == 'Windows'
         shell: pwsh
