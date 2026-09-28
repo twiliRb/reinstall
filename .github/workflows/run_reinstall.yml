@@ -23,10 +23,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends shellcheck xmlstarlet
+          printf 'CHECKPOINT static/dependencies: shellcheck=available xmlstarlet=available\n'
       - name: Check shell syntax
-        run: find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
+        run: |
+          mapfile -d '' shell_files < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+          bash -n "${shell_files[@]}"
+          printf 'CHECKPOINT static/shell-syntax: parsed=%s files\n' "${#shell_files[@]}"
       - name: Run ShellCheck
-        run: find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck --severity=error
+        run: |
+          mapfile -d '' shell_files < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+          shellcheck --severity=error "${shell_files[@]}"
+          printf 'CHECKPOINT static/shellcheck: files=%s severity=error findings=0\n' "${#shell_files[@]}"
       - name: Test Alpine initrd compatibility under BusyBox ash
         run: |
           docker run --rm \
@@ -35,16 +42,22 @@ jobs:
             --entrypoint /bin/sh \
             alpine:3.24.2 \
             tests/test_reinstall_alpine_initrd.sh
-      - name: Test command-line, network, Btrfs, and Windows serializers
-        run: |
-          bash tests/test_reinstall_cmdline.sh
-          sh tests/test_reinstall_network.sh
-          bash tests/test_smoke_output.sh
-          bash tests/test_reinstall_btrfs_layout.sh
-          sh tests/test_reinstall_btrfs_target_config.sh
-          bash tests/test_windows_serialize.sh
+      - name: Test command-line parser and serializer
+        run: bash tests/test_reinstall_cmdline.sh
+      - name: Test network mode policy and configuration
+        run: sh tests/test_reinstall_network.sh
+      - name: Test smoke checkpoint output contract
+        run: bash tests/test_smoke_output.sh
+      - name: Test Btrfs layout planner
+        run: bash tests/test_reinstall_btrfs_layout.sh
+      - name: Test Btrfs target configuration
+        run: sh tests/test_reinstall_btrfs_target_config.sh
+      - name: Test Windows value and XML serializers
+        run: bash tests/test_windows_serialize.sh
       - name: Lint GitHub Actions
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          printf 'CHECKPOINT static/actionlint: workflow-valid=true\n'
 
   distro-contract:
     name: Linux container contract (${{ matrix.distro }})
@@ -178,14 +191,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           source tests/smoke-quiet.sh
-          run_smoke_check 'AlmaLinux' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x almalinux
-          run_smoke_check 'Ubuntu' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x ubuntu
-          run_smoke_check 'Debian' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian
-          run_smoke_check 'Debian cloud-init with network modes' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
-          run_smoke_check 'netboot.xyz' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug netboot.xyz
-          run_smoke_check 'Debian image' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
-          run_smoke_check 'Windows image' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
-          run_smoke_check 'Reset' sudo env PS4='@REINSTALL_XTRACE@ ' REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug reset
+          source_checkpoint="helper=raw.githubusercontent.com/twiliRb/reinstall/$REINSTALL_SOURCE_COMMIT/lib/reinstall-cmdline.sh"
+          run_smoke_check 'AlmaLinux' "$source_checkpoint" 'selection=SET FINALOS ALMALINUX' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x almalinux
+          run_smoke_check 'Ubuntu' "$source_checkpoint" 'selection=SET FINALOS UBUNTU 26.04' 'image=File type: qemu' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x ubuntu
+          run_smoke_check 'Debian' "$source_checkpoint" 'selection=SET FINALOS DEBIAN 13' 'image=File type: qemu' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x debian
+          run_smoke_check 'Debian cloud-init with network modes' "$source_checkpoint" 'next-os=SET NEXTOS DEBIAN 13' 'network=NETWORK INFO' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
+          run_smoke_check 'netboot.xyz' 'target=SET NEXTOS NETBOOT.XYZ' 'image-url=https://boot.netboot.xyz/ipxe/netboot.xyz.efi' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh netboot.xyz
+          run_smoke_check 'Debian image' "$source_checkpoint" 'selection=SET FINALOS DD' 'image=File type: raw.tar.xz' 'firmware=DD: Image is EFI.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
+          run_smoke_check 'Windows image' "$source_checkpoint" 'selection=SET FINALOS WINDOWS' 'image=File type: iso' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
+          run_smoke_check 'Reset' 'reset=reset done.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh reset
       - name: Run Windows smoke checks
         if: runner.os == 'Windows'
         shell: pwsh

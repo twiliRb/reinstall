@@ -42,4 +42,6 @@ if ! diff -u "$tmpdir/expected" "$tmpdir/actual"; then
     exit 1
 fi
 
-echo "Alpine BusyBox ash console-reader contract passed."
+printf 'CHECKPOINT alpine-initrd/ash: active-consoles=%s\n' \
+    "$(tr '\n' ',' <"$tmpdir/actual" | sed 's/,$//')"
+echo "PASS Alpine BusyBox ash console-reader contract"

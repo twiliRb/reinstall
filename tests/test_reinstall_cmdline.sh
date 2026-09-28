@@ -13,6 +13,8 @@ reinstall_cmdline_select_target_disk /dev/vdb
 [[ "$xda" == vdb ]]
 [[ -z "$main_disk" ]]
 [[ "$(reinstall_cmdline_bootloader_disk)" == vda ]]
+printf 'CHECKPOINT cmdline/target-disk: selected=%s bootloader=%s cached-source-id=cleared\n' \
+    "$xda" "$(reinstall_cmdline_bootloader_disk)"
 
 # The optional filesystem selector defaults to ext4, while Btrfs is limited to
 # the install paths that know how to configure its root and boot subvolumes.
@@ -49,6 +51,7 @@ mke2fs_output=$'mke2fs 1.47.4 (5-Feb-2023)\nUsing EXT2FS Library version 1.47.4'
 mke2fs_old_output='mke2fs 1.46.2 (28-Feb-2021)'
 [[ "$(reinstall_e2fsprogs_version_from_mke2fs_output "$mke2fs_old_output")" == 1.46.2 ]]
 [[ -z "$(reinstall_e2fsprogs_version_from_mke2fs_output 'not mke2fs version output')" ]]
+printf 'CHECKPOINT cmdline/filesystem-policy: default=ext4 btrfs=arch, gentoo, nixos, aosc nocompress-min=1.46.2\n'
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -79,6 +82,7 @@ fi
 [[ "$confhome" == "https://raw.githubusercontent.com/twiliRb/reinstall/$source_sha" ]]
 [[ "$filesystem" == btrfs ]]
 [[ ! -e "$marker" ]]
+printf 'CHECKPOINT cmdline/extra-roundtrip: filesystem=%s username=preserved command-sentinel=absent\n' "$filesystem"
 
 # Every finalos_* field emitted by setos() must survive a two-stage reboot.
 finalos_fields=(
@@ -116,6 +120,8 @@ for field in "${extra_fields[@]}"; do
     [[ "${!field}" == "$expected" ]]
 done
 [[ ! -e "$marker" ]]
+printf 'CHECKPOINT cmdline/field-roundtrip: finalos=%s extra=%s command-sentinel=absent\n' \
+    "${#finalos_fields[@]}" "${#extra_fields[@]}"
 
 # The generated web path is used as a filesystem path and must stay under its
 # static root. The websocket command itself is fixed source; its values arrive
@@ -142,6 +148,8 @@ PATH_INFO=$unsafe_web_path TAIL_ARGS_FILE="$tmpdir/tail-args" PATH="$tmpdir/bin:
 [[ "$(cat "$tmpdir/tail-args")" == $'-fn+0\n/reinstall.log' ]]
 grep -Fq 'sample log line' "$tmpdir/websocket-output"
 [[ ! -e "$marker" ]]
+printf 'CHECKPOINT cmdline/websocket: path-validation=passed tail-arguments=%s\n' \
+    "$(tr '\n' ',' <"$tmpdir/tail-args" | sed 's/,$//')"
 
 # Values embedded in generated initrd shell snippets must remain shell data.
 shell_value="Network 'value' \"quotes\" \$HOME \`touch $marker\` \$(touch $marker) & 雪"
@@ -165,6 +173,7 @@ if reinstall_cmdline_load_file "$tmpdir/bad-confhome" extra; then
     printf 'accepted an unpinned external project source\n' >&2
     exit 1
 fi
+printf 'CHECKPOINT cmdline/source-and-injection: legacy-value=inert pinned-source=accepted unpinned-source=rejected sentinel=absent\n'
 
 # GNU getopt's eval round-trip is safe only because getopt shell-quotes every
 # argument. Keep this adversarial value as a regression test for that boundary.
@@ -172,5 +181,6 @@ opts=$(getopt -o '' --long user: -- --user "$username")
 eval "set -- $opts"
 [[ $# == 3 && $1 == --user && $2 == "$username" && $3 == -- ]]
 [[ ! -e "$marker" ]]
+printf 'CHECKPOINT cmdline/getopt: argc=%s quoted-input=inert sentinel=absent\n' "$#"
 
-printf 'command-line parser/serializer tests passed\n'
+printf 'PASS command-line parser/serializer tests\n'

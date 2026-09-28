@@ -17,6 +17,8 @@ modprobe() {
 }
 reinstall_btrfs_activate_kernel_support
 [[ "$preflight_kernel_calls" == 'service:modloop module:btrfs ' ]]
+printf 'CHECKPOINT btrfs-layout/preflight: packages=%s kernel-calls=%s\n' \
+    "$(reinstall_btrfs_preflight_packages)" "${preflight_kernel_calls% }"
 
 two_tib=2199023255552
 
@@ -50,14 +52,17 @@ expect_rejected() {
 gpt_uefi=$'table\tgpt\npartition\t1\tesp\tvfat\t1MiB\t101MiB\tesp\npartition\t2\troot\tbtrfs\t101MiB\t100%\t-\nsubvolume\t@\t/\tcompress=zstd\nsubvolume\t@boot\t/boot\tno-compression'
 expect_plan efi 1 "$gpt_uefi"
 expect_plan efi 999999999999999999999999999999 "$gpt_uefi"
+printf 'CHECKPOINT btrfs-layout/efi-gpt-plan:\n%s\n' "$gpt_uefi"
 
 msdos_bios=$'table\tmsdos\npartition\t1\troot\tbtrfs\t1MiB\t100%\tboot\nsubvolume\t@\t/\tcompress=zstd\nsubvolume\t@boot\t/boot\tno-compression'
 expect_plan bios "$two_tib" "$msdos_bios"
 expect_plan bios 2199023255551 "$msdos_bios"
 expect_plan bios 0002199023255552 "$msdos_bios"
+printf 'CHECKPOINT btrfs-layout/bios-at-or-below-2tib-plan:\n%s\n' "$msdos_bios"
 
 gpt_bios=$'table\tgpt\npartition\t1\tbios_grub\tnone\t1MiB\t2MiB\tbios_grub\npartition\t2\troot\tbtrfs\t2MiB\t100%\t-\nsubvolume\t@\t/\tcompress=zstd\nsubvolume\t@boot\t/boot\tno-compression'
 expect_plan bios 2199023255553 "$gpt_bios"
+printf 'CHECKPOINT btrfs-layout/bios-above-2tib-plan:\n%s\n' "$gpt_bios"
 
 for invalid_firmware in '' biosx EFI uefi; do
     expect_rejected "$invalid_firmware" 1
@@ -67,5 +72,6 @@ for invalid_size in '' 0 000 -1 +1 1.0 1x ' 1' '1 '; do
 done
 expect_rejected bios
 expect_rejected bios 1 extra
+printf 'CHECKPOINT btrfs-layout/invalid-inputs: invalid firmware, disk sizes, missing and extra arguments rejected\n'
 
-printf 'Btrfs layout planner tests passed\n'
+printf 'PASS Btrfs layout planner tests\n'

@@ -11,6 +11,13 @@ usage() {
 
 fail() {
     echo "Btrfs reboot dry-run: $*" >&2
+    [ -n "${_root_fs:-}" ] && printf 'Observed root filesystem: %s\n' "$_root_fs" >&2 || true
+    [ -n "${_root_options:-}" ] && printf 'Observed root options: %s\n' "$_root_options" >&2 || true
+    [ -n "${_boot_fs:-}" ] && printf 'Observed /boot filesystem: %s\n' "$_boot_fs" >&2 || true
+    [ -n "${_boot_options:-}" ] && printf 'Observed /boot options: %s\n' "$_boot_options" >&2 || true
+    [ -n "${_boot_attributes:-}" ] && printf 'Observed /boot attributes: %s\n' "$_boot_attributes" >&2 || true
+    [ -n "${_boot_file_attributes:-}" ] && printf 'Observed /boot file attributes: %s\n' "$_boot_file_attributes" >&2 || true
+    [ -n "${_efi_fs:-}" ] && printf 'Observed EFI filesystem: %s\n' "$_efi_fs" >&2 || true
     exit 1
 }
 
@@ -56,6 +63,8 @@ make_state() {
     btrfs subvolume create "$_top/@" >/dev/null
     btrfs subvolume create "$_top/@boot" >/dev/null
     chattr +m "$_top/@boot" || fail "could not set no-compression on @boot"
+    printf 'CHECKPOINT btrfs-dry-run/prepare-subvolumes: distro=%s firmware=%s root=@ compression=zstd boot=@boot compression-attribute=m\n' \
+        "$_distro" "$_boot_mode"
     _root_subvolume_id=$(btrfs inspect-internal rootid "$_top/@")
     btrfs subvolume set-default "$_root_subvolume_id" "$_top" >/dev/null
     umount "$_top"
@@ -76,6 +85,18 @@ make_state() {
         mount -t vfat -o loop,umask=077 "$_esp_image" "$_target/efi" ||
             fail "could not mount the target EFI system partition"
     fi
+    _prepared_root_fs=$(findmnt -rn -o FSTYPE --target "$_target")
+    _prepared_boot_fs=$(findmnt -rn -o FSTYPE --target "$_target/boot")
+    [ "$_prepared_root_fs" = btrfs ] && [ "$_prepared_boot_fs" = btrfs ] ||
+        fail "prepared root and /boot mounts are not both Btrfs"
+    if [ "$_boot_mode" = efi ]; then
+        _prepared_efi_fs=$(findmnt -rn -o FSTYPE --target "$_target/efi")
+        [ "$_prepared_efi_fs" = vfat ] || fail "prepared ESP is not vfat"
+    else
+        _prepared_efi_fs=not-applicable
+    fi
+    printf 'CHECKPOINT btrfs-dry-run/prepare-mounts: root=%s/@ boot=%s/@boot efi=%s\n' \
+        "$_prepared_root_fs" "$_prepared_boot_fs" "$_prepared_efi_fs"
 
     _root_uuid=$(blkid -s UUID -o value "$_image")
     [ -n "$_root_uuid" ] || fail "could not read the Btrfs UUID"
@@ -130,6 +151,8 @@ make_state() {
         printf 'root_uuid=%s\n' "$_root_uuid"
         printf 'efi_uuid=%s\n' "$_efi_uuid"
     } >"$_state_dir/state.env"
+    printf 'CHECKPOINT btrfs-dry-run/prepare-persisted-state: distro=%s firmware=%s root-uuid=%s efi-uuid=%s target-files=present\n' \
+        "$_distro" "$_boot_mode" "$_root_uuid" "${_efi_uuid:-not-applicable}"
 }
 
 verify_state() {
@@ -137,6 +160,13 @@ verify_state() {
     _boot_mode=$2
     _state_dir=$3
     _work_dir=$4
+    _root_fs=
+    _root_options=
+    _boot_fs=
+    _boot_options=
+    _boot_attributes=
+    _boot_file_attributes=
+    _efi_fs=
     _image="$_state_dir/btrfs.img"
     _esp_image="$_state_dir/esp.img"
     _target="$_work_dir/target"
@@ -160,10 +190,12 @@ verify_state() {
 
     _root_fs=$(findmnt -rn -o FSTYPE --target "$_target")
     _root_options=$(findmnt -rn -o OPTIONS --target "$_target")
+    _boot_fs=$(findmnt -rn -o FSTYPE --target "$_target/boot")
     _boot_options=$(findmnt -rn -o OPTIONS --target "$_target/boot")
     _boot_attributes=$(lsattr -d "$_target/boot" | awk '{ print $1 }')
     _boot_file_attributes=$(lsattr -d "$_target/boot/vmlinuz-reinstall-ci" | awk '{ print $1 }')
     [ "$_root_fs" = btrfs ] || fail "root is not mounted as Btrfs after simulated reboot"
+    [ "$_boot_fs" = btrfs ] || fail "/boot is not mounted as Btrfs after simulated reboot"
     case $_root_options in *compress=zstd*) ;; *) fail "root mount lost compress=zstd" ;; esac
     case ",$_root_options," in
     *,subvol=@,*|*,subvol=/@,*) ;;
@@ -214,6 +246,22 @@ verify_state() {
         fi
     fi
 
+    printf 'CHECKPOINT btrfs-dry-run/post-reboot-mounts: distro=%s firmware=%s root=%s options=%s boot=%s options=%s boot-attrs=%s kernel-attrs=%s efi=%s\n' \
+        "$_distro" "$_boot_mode" "$_root_fs" "$_root_options" \
+        "$_boot_fs" "$_boot_options" "$_boot_attributes" \
+        "$_boot_file_attributes" "${_efi_fs:-not-applicable}"
+    printf 'CHECKPOINT btrfs-dry-run/persisted-config:\n'
+    if [ "$_distro" = nixos ]; then
+        grep -E '^(fileSystems\.|boot\.kernelParams|boot\.supportedFilesystems|boot\.initrd\.supportedFilesystems|environment\.systemPackages)' \
+            "$_target/etc/nixos/reinstall-ci.nix" | sed 's/^/  | /'
+        printf '  | initrd-modules=%s\n' \
+            "$(cat "$_target/etc/nixos/reinstall-ci-initrd-modules")"
+    else
+        awk '$2 == "/" || $2 == "/boot" || $2 == "/efi" { print "  | " $0 }' \
+            "$_target/etc/fstab"
+        sed 's/^/  | /' "$_target/etc/default/grub.dry-run"
+    fi
+
     sync
     if [ "$_boot_mode" = efi ]; then
         umount "$_target/efi"
@@ -241,7 +289,7 @@ run_all() {
             prepare-all) make_state "$_distro" "$_boot_mode" "$_state_dir" "$_work_dir" ;;
             verify-all) verify_state "$_distro" "$_boot_mode" "$_state_dir" "$_work_dir" ;;
             esac
-            echo "$_operation: $_distro/$_boot_mode passed"
+            printf 'PASS btrfs-dry-run/%s: %s/%s\n' "$_operation" "$_distro" "$_boot_mode"
         done
     done
 }

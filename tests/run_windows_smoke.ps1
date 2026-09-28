@@ -1,39 +1,88 @@
 $ErrorActionPreference = 'Stop'
 
 $installer = Join-Path $PSScriptRoot '..\reinstall.bat'
-$tracePrefix = '@REINSTALL_XTRACE@ '
-$tracePattern = '^@+REINSTALL_XTRACE@ '
-$env:PS4 = $tracePrefix
+$sourcePattern = "raw.githubusercontent.com/twiliRb/reinstall/$($env:REINSTALL_SOURCE_COMMIT)/lib/reinstall-cmdline.sh"
 $cases = @(
-    @{ Name = 'AlmaLinux'; Arguments = @('--debug', '--username', 'x', '--password', 'x', 'almalinux') },
-    @{ Name = 'Ubuntu'; Arguments = @('--debug', '--username', 'x', '--password', 'x', 'ubuntu') },
-    @{ Name = 'Debian'; Arguments = @('--debug', '--username', 'x', '--password', 'x', 'debian') },
-    @{ Name = 'Debian cloud-init with network modes'; Arguments = @('--debug', '--username', 'x', '--password', 'x', '--ip-mode', 'dhcp', '--dns-mode', 'static', '--dns-servers', '1.1.1.1', 'debian', '--ci') },
-    @{ Name = 'netboot.xyz'; Arguments = @('--debug', 'netboot.xyz') },
-    @{ Name = 'Debian image'; Arguments = @('--debug', '--username', 'x', '--password', 'x', 'dd', '--img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz') },
-    @{ Name = 'Windows image'; Arguments = @('--debug', '--username', 'x', '--password', 'x', 'windows', '--image-name=Windows Server blah', '--iso', 'https://aka.ms/HCIReleaseImage') },
-    @{ Name = 'Reset'; Arguments = @('--debug', 'reset') }
+    @{
+        Name = 'AlmaLinux'
+        Arguments = @('--username', 'x', '--password', 'x', 'almalinux')
+        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS ALMALINUX', 'next-os=SET NEXTOS ALPINE 3.24', 'network=NETWORK INFO', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+    },
+    @{
+        Name = 'Ubuntu'
+        Arguments = @('--username', 'x', '--password', 'x', 'ubuntu')
+        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS UBUNTU 26.04', 'image=File type: qemu', 'next-os=SET NEXTOS ALPINE 3.24', 'network=NETWORK INFO', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+    },
+    @{
+        Name = 'Debian'
+        Arguments = @('--username', 'x', '--password', 'x', 'debian')
+        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS DEBIAN 13', 'image=File type: qemu', 'next-os=SET NEXTOS ALPINE 3.24', 'network=NETWORK INFO', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+    },
+    @{
+        Name = 'Debian cloud-init with network modes'
+        Arguments = @('--username', 'x', '--password', 'x', '--ip-mode', 'dhcp', '--dns-mode', 'static', '--dns-servers', '1.1.1.1', 'debian', '--ci')
+        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS DEBIAN 13', 'network=NETWORK INFO', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+    },
+    @{
+        Name = 'netboot.xyz'
+        Arguments = @('netboot.xyz')
+        Checkpoints = @('target=SET NEXTOS NETBOOT.XYZ', 'image-url=https://boot.netboot.xyz/ipxe/netboot.xyz.efi', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+    },
+    @{
+        Name = 'Debian image'
+        Arguments = @('--username', 'x', '--password', 'x', 'dd', '--img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz')
+        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS DD', 'image=File type: raw.tar.xz', 'firmware=DD: Image is EFI.')
+    },
+    @{
+        Name = 'Windows image'
+        Arguments = @('--username', 'x', '--password', 'x', 'windows', '--image-name=Windows Server blah', '--iso', 'https://aka.ms/HCIReleaseImage')
+        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS WINDOWS', 'image=File type: iso')
+    },
+    @{
+        Name = 'Reset'
+        Arguments = @('reset')
+        Checkpoints = @('reset=reset done.')
+    }
 )
 
 foreach ($case in $cases) {
     $log = [System.IO.Path]::GetTempFileName()
     try {
+        Write-Output "RUN $($case.Name)"
         $arguments = $case.Arguments
         & $installer @arguments *> $log
         $status = $LASTEXITCODE
+
         if ($status -eq 0) {
-            Write-Output "PASS $($case.Name)"
-            $visibleOutput = @(Get-Content -LiteralPath $log | Where-Object { $_ -notmatch $tracePattern })
-            if ($visibleOutput.Count -gt 0) {
-                Write-Output "OUTPUT $($case.Name)"
-                $visibleOutput | Write-Output
+            foreach ($checkpoint in $case.Checkpoints) {
+                $separator = $checkpoint.IndexOf('=')
+                if ($separator -lt 1) {
+                    Write-Output "FAIL $($case.Name): malformed checkpoint $checkpoint"
+                    $status = 2
+                    break
+                }
+
+                $stage = $checkpoint.Substring(0, $separator)
+                $pattern = $checkpoint.Substring($separator + 1)
+                $matched = Get-Content -LiteralPath $log |
+                    Where-Object { $_.Contains($pattern) } |
+                    Select-Object -First 1
+                if ($null -eq $matched) {
+                    Write-Output "FAIL $($case.Name): checkpoint $stage missing ($pattern)"
+                    $status = 1
+                    break
+                }
+                Write-Output "CHECKPOINT $($case.Name)/${stage}: $matched"
             }
-            continue
         }
 
-        Write-Output "FAIL $($case.Name) (exit $status)"
-        Get-Content -LiteralPath $log | Write-Host
-        exit $status
+        if ($status -ne 0) {
+            Write-Output "FAIL $($case.Name) (exit $status)"
+            Get-Content -LiteralPath $log | Write-Output
+            exit $status
+        }
+
+        Write-Output "PASS $($case.Name)"
     }
     finally {
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue

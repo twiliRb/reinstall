@@ -16,6 +16,8 @@ encoded=${encoded%\'}
 decoded=$(printf '%s' "$encoded" | base64 -d)
 [[ "$decoded" == "$value" ]]
 [[ ! -e "$marker" ]]
+printf 'CHECKPOINT windows-serialize/powershell-literal: base64-roundtrip=passed utf8-bytes=%s command-sentinel=absent\n' \
+    "$(printf '%s' "$decoded" | wc -c | tr -d ' ')"
 
 xml_file="$tmpdir/unattend.xml"
 cat >"$xml_file" <<'XML'
@@ -31,5 +33,6 @@ expected_xml_value=$(printf '%s' "$value" | sed \
     -e 's/>/\&gt;/g')
 [[ "$xml_value" == "$expected_xml_value" ]]
 [[ ! -e "$marker" ]]
+printf 'CHECKPOINT windows-serialize/xml: xpath-roundtrip=passed escaped-entities=ampersand/less-than/greater-than unicode=preserved command-sentinel=absent\n'
 
-printf 'Windows value/XML serializer tests passed\n'
+printf 'PASS Windows value/XML serializer tests\n'
