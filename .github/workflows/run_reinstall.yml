@@ -44,15 +44,20 @@ jobs:
             tests/test_reinstall_alpine_initrd.sh
       - name: Test Alpine eudev service setup for NetworkManager
         run: |
+          # setup-devd also starts udev; this container check only validates its runlevel configuration.
           docker run --rm --entrypoint /bin/sh alpine:3.24.2 -ec '
             apk add --no-cache alpine-conf eudev openrc
+            mkdir -p /tmp/rc-service-shim
+            printf "#!/bin/sh\\nexit 0\\n" > /tmp/rc-service-shim/rc-service
+            chmod +x /tmp/rc-service-shim/rc-service
+            PATH="/tmp/rc-service-shim:$PATH"
             setup-devd udev
             for service in udev udev-trigger udev-settle; do
               test -L "/etc/runlevels/sysinit/$service"
             done
             test -L /etc/runlevels/default/udev-postmount
             test ! -e /etc/runlevels/sysinit/mdev
-            printf "CHECKPOINT alpine/networkmanager-udev: sysinit=udev,udev-trigger,udev-settle postmount=enabled mdev=disabled\\n"
+            printf "%s\\n" "CHECKPOINT alpine/networkmanager-udev: sysinit=udev,udev-trigger,udev-settle postmount=enabled mdev=disabled daemon_start=stubbed"
           '
       - name: Test command-line parser and serializer
         run: bash tests/test_reinstall_cmdline.sh
