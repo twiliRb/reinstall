@@ -22,7 +22,7 @@ $cases = @(
     @{
         Name = 'Debian cloud-init network, SSH key and ext4'
         Arguments = @('--username', 'x', '--ssh-key', $testSshKey, '--ssh-port', '2222', '--filesystem', 'ext4', '--ip-mode', 'dhcp', '--dns-mode', 'static', '--dns-servers', '1.1.1.1', 'debian', '--ci')
-        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS DEBIAN 13', 'network=NETWORK INFO', 'ssh-key=Public Key: ssh-ed25519', 'ssh-port=SSH Port: 2222', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS ALPINE 3.24', 'network=NETWORK INFO', 'ssh-key=Public Key: ssh-ed25519', 'ssh-port=SSH Port: 2222', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
     },
     @{
         Name = 'netboot.xyz'

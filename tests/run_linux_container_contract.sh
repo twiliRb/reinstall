@@ -38,11 +38,13 @@ elif command -v apt-get >/dev/null 2>&1; then
 elif command -v pacman >/dev/null 2>&1; then
     pacman -Sy --needed --noconfirm gawk diffutils coreutils
 elif command -v dnf >/dev/null 2>&1; then
-    dnf install --assumeyes gawk diffutils coreutils
+    # RHEL-family minimal images ship coreutils-single, which conflicts with
+    # the full coreutils package. diffutils supplies the missing cmp command.
+    dnf install --assumeyes gawk diffutils
 elif command -v microdnf >/dev/null 2>&1; then
-    microdnf install --assumeyes gawk diffutils coreutils
+    microdnf install --assumeyes gawk diffutils
 elif command -v yum >/dev/null 2>&1; then
-    yum install --assumeyes gawk diffutils coreutils
+    yum install --assumeyes gawk diffutils
 elif command -v zypper >/dev/null 2>&1; then
     zypper --non-interactive install gawk diffutils coreutils
 elif command -v nix-shell >/dev/null 2>&1; then
