@@ -4474,11 +4474,14 @@ This script is outdated, please download reinstall.sh again.
 
     curl -Lo $initrd_dir/initrd-network.sh $confhome/initrd-network.sh
     curl -Lo "$initrd_dir/reinstall-cmdline.sh" "$confhome/lib/reinstall-cmdline.sh"
+    curl -Lo "$initrd_dir/reinstall-network-probe.sh" "$confhome/lib/reinstall-network-probe.sh"
     curl -Lo "$initrd_dir/reinstall-btrfs-layout.sh" "$confhome/lib/reinstall-btrfs-layout.sh"
     curl -Lo "$initrd_dir/windows-serialize.sh" "$confhome/lib/windows-serialize.sh"
     curl -Lo "$initrd_dir/reinstall-ssh.sh" "$confhome/lib/reinstall-ssh.sh"
     [ -s "$initrd_dir/reinstall-btrfs-layout.sh" ] ||
         error_and_exit "Downloaded pinned Btrfs layout planner is empty."
+    [ -s "$initrd_dir/reinstall-network-probe.sh" ] ||
+        error_and_exit "Downloaded pinned network connectivity probe helper is empty."
     [ -s "$initrd_dir/reinstall-ssh.sh" ] ||
         error_and_exit "Downloaded pinned SSH key writer is empty."
     chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh

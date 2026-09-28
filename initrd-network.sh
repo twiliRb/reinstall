@@ -25,6 +25,15 @@ if ! [ -r "$cmdline_helper" ]; then
     exit 1
 fi
 . "$cmdline_helper"
+network_probe_helper=/reinstall-network-probe.sh
+if ! [ -r "$network_probe_helper" ]; then
+    network_probe_helper="$(dirname "$0")/lib/reinstall-network-probe.sh"
+fi
+if ! [ -r "$network_probe_helper" ]; then
+    echo "Missing network connectivity probe helper: $network_probe_helper" >&2
+    exit 1
+fi
+. "$network_probe_helper"
 if ! reinstall_network_validate_cli_options; then
     echo "Invalid network mode or DNS server list." >&2
     exit 1
@@ -33,26 +42,10 @@ fi
 DHCP_TIMEOUT=15
 DNS_FILE_TIMEOUT=5
 TEST_TIMEOUT=10
-
-# 检测是否有网络是通过检测这些 IP 的端口是否开放
-# 因为 debian initrd 没有 nslookup
-# 改成 generate_204？但检测网络时可能 resolv.conf 为空
-# HTTP 80
-# HTTPS/DOH 443
-# DOT 853
-if $is_in_china; then
-    ipv4_dns1='223.5.5.5'
-    ipv4_dns2='119.29.29.29' # 不开放 853
-    ipv6_dns1='2400:3200::1'
-    ipv6_dns2='2402:4e00::' # 不开放 853
-else
-    ipv4_dns1='1.1.1.1'
-    ipv4_dns2='8.8.8.8' # 不开放 80
-    ipv6_dns1='2606:4700:4700::1111'
-    ipv6_dns2='2001:4860:4860::8888' # 不开放 80
-fi
-ipv4_probe_dns="$ipv4_dns1 $ipv4_dns2"
-ipv6_probe_dns="$ipv6_dns1 $ipv6_dns2"
+ipv4_dns1=$(reinstall_network_fallback_dns_server 4 1 "$is_in_china") || exit 1
+ipv4_dns2=$(reinstall_network_fallback_dns_server 4 2 "$is_in_china") || exit 1
+ipv6_dns1=$(reinstall_network_fallback_dns_server 6 1 "$is_in_china") || exit 1
+ipv6_dns2=$(reinstall_network_fallback_dns_server 6 2 "$is_in_china") || exit 1
 
 capture_resolv_dns_servers() {
     local candidates server servers
@@ -264,82 +257,8 @@ is_need_test_ipv6() {
 # debian9  ×    √   没有此软件
 # alpine   √    ×      ×
 
-test_by_wget() {
-    src=$1
-    dst=$2
-
-    # ipv6 需要添加 []
-    if echo "$dst" | grep -q ':'; then
-        url="https://[$dst]"
-    else
-        url="https://$dst"
-    fi
-
-    # tcp 443 通了就算成功，不管 http 是不是 404
-    # grep -m1 快速返回
-    wget -T "$TEST_TIMEOUT" \
-        --bind-address="$src" \
-        --no-check-certificate \
-        --max-redirect 0 \
-        --tries 1 \
-        -O /dev/null \
-        "$url" 2>&1 | grep -iq -m1 connected
-}
-
-test_by_nc() {
-    src=$1
-    dst=$2
-
-    # tcp 443 通了就算成功
-    nc -z -v \
-        -w "$TEST_TIMEOUT" \
-        -s "$src" \
-        "$dst" 443
-}
-
 is_debian_kali() {
     [ -f /etc/lsb-release ] && grep -Eiq 'Debian|Kali' /etc/lsb-release
-}
-
-test_connect() {
-    if is_debian_kali; then
-        test_by_wget "$1" "$2"
-    else
-        test_by_nc "$1" "$2"
-    fi
-}
-
-test_against_dns_servers() {
-    local source_addr=$1 servers server
-    servers=$2
-    for server in $servers; do
-        if test_connect "$source_addr" "$server"; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-test_internet() {
-    for i in $(seq 5); do
-        echo "Testing Internet Connection. Test $i... "
-        if is_need_test_ipv4 &&
-            current_ipv4_addr="$(get_first_ipv4_addr | remove_netmask)" &&
-            test_against_dns_servers "$current_ipv4_addr" "$ipv4_probe_dns" >/dev/null 2>&1; then
-            echo "IPv4 has internet."
-            ipv4_has_internet=true
-        fi
-        if is_need_test_ipv6 &&
-            current_ipv6_addr="$(get_first_ipv6_addr | remove_netmask)" &&
-            test_against_dns_servers "$current_ipv6_addr" "$ipv6_probe_dns" >/dev/null 2>&1; then
-            echo "IPv6 has internet."
-            ipv6_has_internet=true
-        fi
-        if ! is_need_test_ipv4 && ! is_need_test_ipv6; then
-            break
-        fi
-        sleep 1
-    done
 }
 
 flush_ipv4_config() {
@@ -493,10 +412,6 @@ esac
 
 if [ "$dns_mode" != auto ]; then
     [ -z "$runtime_dns_servers" ] || write_resolv_dns_servers "$runtime_dns_servers"
-    ipv4_probe_dns=$(reinstall_network_filter_dns_servers "$runtime_dns_servers" 4)
-    ipv6_probe_dns=$(reinstall_network_filter_dns_servers "$runtime_dns_servers" 6)
-    [ -n "$ipv4_probe_dns" ] || ipv4_probe_dns="$ipv4_dns1 $ipv4_dns2"
-    [ -n "$ipv6_probe_dns" ] || ipv6_probe_dns="$ipv6_dns1 $ipv6_dns2"
 fi
 
 # 记录是否有动态地址

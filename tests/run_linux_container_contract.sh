@@ -6,6 +6,8 @@ run_contract_tests() {
     sh tests/test_reinstall_btrfs_target_config.sh
     printf 'CHECKPOINT container-contract/network-policy: start\n'
     sh tests/test_reinstall_network.sh
+    printf 'CHECKPOINT container-contract/network-probe: start\n'
+    sh tests/test_reinstall_network_probe.sh
     printf 'CHECKPOINT container-contract/ext4-layout: start\n'
     sh tests/test_reinstall_ext4_layout.sh
     printf 'CHECKPOINT container-contract/ssh-key-writer: start\n'

@@ -48,6 +48,8 @@ jobs:
         run: sh tests/test_reinstall_ssh.sh
       - name: Test network mode policy and configuration
         run: sh tests/test_reinstall_network.sh
+      - name: Test initrd DNS and Internet probe isolation
+        run: sh tests/test_reinstall_network_probe.sh
       - name: Test smoke checkpoint output contract
         run: bash tests/test_smoke_output.sh
       - name: Test Btrfs layout planner
