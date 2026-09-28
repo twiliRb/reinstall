@@ -1735,6 +1735,38 @@ EOF
     done
 }
 
+persist_alpine_target_dns_policy() {
+    local os_dir=$1 target_has_static_ip=false target_dns_list target_dns_policy_result
+    local target_dns_policy_status target_dns_csv
+
+    for ethx in $(get_eths); do
+        if is_staticv4 || is_staticv6; then
+            target_has_static_ip=true
+            break
+        fi
+    done
+    target_dns_list=$(get_current_dns) || target_dns_list=
+    if target_dns_policy_result=$(reinstall_network_apply_alpine_dns_policy \
+        "${dns_mode:-auto}" "$target_has_static_ip" "$target_dns_list" \
+        "$os_dir/etc/dhcpcd.conf" "$os_dir/etc/resolv.conf"); then
+        case "$target_dns_policy_result" in
+        skipped) ;;
+        persisted)
+            target_dns_csv=$(printf '%s\n' "$target_dns_list" | tr '\n' ',' | sed 's/,$//')
+            info "Persisted Alpine DNS policy ($dns_mode): $target_dns_csv; disabled dhcpcd resolv.conf hook"
+            ;;
+        *) error_and_exit "Unexpected Alpine DNS policy result: $target_dns_policy_result" ;;
+        esac
+    else
+        target_dns_policy_status=$?
+        case "$target_dns_policy_status" in
+        2) error_and_exit "No DNS servers were acquired from DHCP/RA for the static target." ;;
+        3) error_and_exit "Failed to persist the selected Alpine DNS servers." ;;
+        *) error_and_exit "Failed to apply Alpine DNS policy (status $target_dns_policy_status)." ;;
+        esac
+    fi
+}
+
 install_alpine() {
     info "install alpine"
 
@@ -1884,6 +1916,7 @@ install_alpine() {
 
     # 安装 dhcpcd
     chroot /os apk add dhcpcd
+    persist_alpine_target_dns_policy /os
     chroot /os sed -i '/^slaac private/s/^/#/' /etc/dhcpcd.conf
     chroot /os sed -i '/^#slaac hwaddr/s/^#//' /etc/dhcpcd.conf
 

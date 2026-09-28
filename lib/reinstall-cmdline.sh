@@ -208,6 +208,18 @@ reinstall_network_render_dns_config() {
             done
         )
         ;;
+    resolv-conf)
+        (
+            IFS=,
+            set -f
+            for server in $_reinstall_servers; do
+                printf 'nameserver %s\n' "$server"
+            done
+        )
+        ;;
+    alpine-dhcpcd)
+        printf 'nohook resolv.conf\n'
+        ;;
     nixos)
         printf '  nameservers = [\n'
         (
@@ -221,6 +233,70 @@ reinstall_network_render_dns_config() {
         ;;
     *) return 2 ;;
     esac
+}
+
+reinstall_network_write_alpine_dns_config() {
+    local _reinstall_dhcpcd_conf=$1 _reinstall_resolv_conf=$2 _reinstall_servers=$3
+    local _reinstall_dhcpcd_tmp _reinstall_resolv_tmp
+
+    reinstall_network_validate_dns_servers "$_reinstall_servers" || return 1
+    [ -f "$_reinstall_dhcpcd_conf" ] || return 1
+
+    _reinstall_dhcpcd_tmp=$(mktemp "${_reinstall_dhcpcd_conf}.XXXXXX") || return 1
+    _reinstall_resolv_tmp=$(mktemp "${_reinstall_resolv_conf}.XXXXXX") || {
+        rm -f "$_reinstall_dhcpcd_tmp"
+        return 1
+    }
+
+    if grep -Eq '^[[:space:]]*nohook[[:space:]].*resolv\.conf([[:space:]]|$)' \
+        "$_reinstall_dhcpcd_conf"; then
+        cat "$_reinstall_dhcpcd_conf" >"$_reinstall_dhcpcd_tmp" || {
+            rm -f "$_reinstall_dhcpcd_tmp" "$_reinstall_resolv_tmp"
+            return 1
+        }
+    else
+        {
+            reinstall_network_render_dns_config alpine-dhcpcd "$_reinstall_servers"
+            cat "$_reinstall_dhcpcd_conf"
+        } >"$_reinstall_dhcpcd_tmp" || {
+            rm -f "$_reinstall_dhcpcd_tmp" "$_reinstall_resolv_tmp"
+            return 1
+        }
+    fi
+
+    reinstall_network_render_dns_config resolv-conf "$_reinstall_servers" >"$_reinstall_resolv_tmp" || {
+        rm -f "$_reinstall_dhcpcd_tmp" "$_reinstall_resolv_tmp"
+        return 1
+    }
+    chmod 644 "$_reinstall_dhcpcd_tmp" "$_reinstall_resolv_tmp" || {
+        rm -f "$_reinstall_dhcpcd_tmp" "$_reinstall_resolv_tmp"
+        return 1
+    }
+    mv -f "$_reinstall_dhcpcd_tmp" "$_reinstall_dhcpcd_conf" &&
+        mv -f "$_reinstall_resolv_tmp" "$_reinstall_resolv_conf"
+}
+
+reinstall_network_apply_alpine_dns_policy() {
+    local _reinstall_mode=$1 _reinstall_target_has_static_ip=$2 _reinstall_dns_list=$3
+    local _reinstall_dhcpcd_conf=$4 _reinstall_resolv_conf=$5 _reinstall_dns_csv
+
+    case "$_reinstall_mode" in auto | dhcp | static) ;; *) return 1 ;; esac
+    case "$_reinstall_target_has_static_ip" in true | false) ;; *) return 1 ;; esac
+
+    if ! reinstall_network_should_persist_dns \
+        "$_reinstall_mode" "$_reinstall_target_has_static_ip"; then
+        printf 'skipped\n'
+        return 0
+    fi
+    if ! reinstall_network_require_target_dns \
+        "$_reinstall_mode" "$_reinstall_target_has_static_ip" "$_reinstall_dns_list"; then
+        return 2
+    fi
+
+    _reinstall_dns_csv=$(printf '%s\n' "$_reinstall_dns_list" | tr '\n' ',' | sed 's/,$//')
+    reinstall_network_write_alpine_dns_config \
+        "$_reinstall_dhcpcd_conf" "$_reinstall_resolv_conf" "$_reinstall_dns_csv" || return 3
+    printf 'persisted\n'
 }
 
 # Select a CLI target after bootloader discovery, which may have cached the
