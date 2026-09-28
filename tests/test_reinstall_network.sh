@@ -190,6 +190,21 @@ if reinstall_network_validate_cli_options; then
 fi
 printf 'CHECKPOINT network/mode-combinations: accepted auto/auto and static DNS; rejected invalid modes and inconsistent DNS options\n'
 
+single_debian_preseed_dns_arg=$(reinstall_network_debian_preseed_dns_arg static '9.9.9.9')
+multi_debian_preseed_dns_arg=$(reinstall_network_debian_preseed_dns_arg static '1.1.1.1,2606:4700:4700::1111')
+assert_eq "$single_debian_preseed_dns_arg" 'netcfg/get_nameservers="9.9.9.9"'
+assert_eq "$multi_debian_preseed_dns_arg" 'netcfg/get_nameservers="1.1.1.1 2606:4700:4700::1111"'
+for _dns_mode in auto dhcp; do
+    assert_eq "$(reinstall_network_debian_preseed_dns_arg "$_dns_mode" '1.1.1.1,2606:4700:4700::1111')" ''
+done
+if _rejected_arg=$(reinstall_network_debian_preseed_dns_arg static "1.1.1.1;touch $marker"); then
+    printf 'accepted invalid DNS in the Debian preseed kernel argument\n' >&2
+    exit 1
+fi
+assert_eq "$_rejected_arg" ''
+[ ! -e "$marker" ]
+printf 'CHECKPOINT network/debian-preseed-dns: static IPv4/IPv6 lists become one quoted kernel value before preseed fetch; auto and DHCP stay unchanged\n'
+
 explicit_dns='1.1.1.1,2606:4700:4700::1111'
 dhcp_dns='192.0.2.53,2001:db8::53'
 legacy_dns='8.8.8.8,2001:4860:4860::8888'

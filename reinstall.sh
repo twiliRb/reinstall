@@ -3634,6 +3634,10 @@ build_nextos_cmdline() {
         # iso 默认有 vga=788
         # 如果要设置位数: video=800x600-16
         nextos_cmdline="lowmem/low=1 auto=true priority=critical"
+        if [ "${dns_mode:-auto}" = static ]; then
+            nextos_cmdline+=" $(reinstall_network_debian_preseed_dns_arg "$dns_mode" "$dns_servers")"
+            echo "CHECKPOINT network/debian-preseed-dns: static resolver passed before preseed fetch"
+        fi
         # nextos_cmdline+=" vga=788 video=800x600"
         nextos_cmdline+=" url=$nextos_ks"
         nextos_cmdline+=" mirror/http/hostname=${nextos_udeb_mirror%/*}"

@@ -177,7 +177,7 @@ bash reinstall.sh anolis      7|8|23
 - `--ssh-port PORT` Change the SSH port
 - `--web-port PORT` Change the Web port (for log observation during installation only)
 - `--ip-mode auto|dhcp|static` Select the target IPv4 mode. `auto` keeps the existing automatic choice; `static` reuses the collected address and gateway.
-- `--dns-mode auto|dhcp|static` Select the target DNS mode. `auto` keeps existing behavior; with a static IP and `dhcp`, DNS servers learned during installation are saved.
+- `--dns-mode auto|dhcp|static` Select the target DNS mode. `auto` keeps existing behavior; with a static IP and `dhcp`, DNS servers learned during installation are saved. Debian-family installers also use `static` DNS before fetching the remote preseed.
 - `--dns-servers IP[,IP...]` Set static DNS servers using IPv4 and/or IPv6 addresses; requires `--dns-mode static`.
 - `--network-backend auto|systemd-networkd|NetworkManager` Select the target network manager. The default `auto` preserves each distribution's existing behavior. Explicit `systemd-networkd` is supported on Debian/Kali, Ubuntu, Arch, Gentoo, Fedora and NixOS; `NetworkManager` is supported on Alpine, Debian/Kali, Ubuntu, Arch, Gentoo, AOSC, Fedora, openSUSE, NixOS, RHEL-family systems and FNOS.
 - `--frpc-config PATH` Add frpc for intranet tunneling. Parameter can be local filepath or HTTP URL of the configuration file.

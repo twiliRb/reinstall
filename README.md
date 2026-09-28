@@ -178,7 +178,7 @@ bash reinstall.sh anolis      7|8|23
 - `--web-port PORT` 修改 Web 端口（安装期间观察日志用）
 - `--filesystem ext4|btrfs` 选择根文件系统，默认 `ext4`。首版 Btrfs 仅支持 Arch、Gentoo、NixOS、AOSC：`/` 使用 `@` 子卷并启用 `compress=zstd`，`/boot` 使用 `@boot` 子卷且关闭压缩；UEFI 的 ESP 挂载在 `/efi`
 - `--ip-mode auto|dhcp|static` 选择目标系统的 IPv4 获取方式，默认 `auto` 保留现有自动判断；`static` 使用当前采集到的 IP 和网关
-- `--dns-mode auto|dhcp|static` 选择目标系统的 DNS 方式，默认 `auto` 保留现有行为；静态 IP 配合 `dhcp` 时会保存安装期间从 DHCP/RA 获取的 DNS
+- `--dns-mode auto|dhcp|static` 选择目标系统的 DNS 方式，默认 `auto` 保留现有行为；静态 IP 配合 `dhcp` 时会保存安装期间从 DHCP/RA 获取的 DNS；Debian 系安装器在获取远程 preseed 前会使用 `static` 指定的 DNS
 - `--dns-servers IP[,IP...]` 设置静态 DNS，支持 IPv4/IPv6 地址，须与 `--dns-mode static` 一起使用
 - `--network-backend auto|systemd-networkd|NetworkManager` 选择目标系统的网络管理器，默认 `auto` 保留发行版原有行为。显式选择目前支持：`systemd-networkd` 用于 Debian/Kali、Ubuntu、Arch、Gentoo、Fedora、NixOS；`NetworkManager` 用于 Alpine、Debian/Kali、Ubuntu、Arch、Gentoo、AOSC、Fedora、openSUSE、NixOS、RHEL 系及 FNOS
 - `--frpc-config PATH` 添加 frpc 内网穿透，参数填配置文件的本地路径或 HTTP 链接

@@ -513,6 +513,23 @@ reinstall_network_validate_cli_options() {
     fi
 }
 
+# Pass explicitly selected DNS servers to Debian Installer before it fetches a
+# network preseed. D-I cannot obtain netcfg/* answers from a preseed it has not
+# downloaded yet, so `static` must be available on the kernel command line.
+reinstall_network_debian_preseed_dns_arg() {
+    local _reinstall_preseed_nameservers
+
+    case "${1:-}" in
+    static)
+        reinstall_network_validate_dns_servers "${2:-}" || return 1
+        _reinstall_preseed_nameservers=$(printf '%s' "$2" | tr ',' ' ')
+        printf 'netcfg/get_nameservers="%s"' "$_reinstall_preseed_nameservers"
+        ;;
+    auto | dhcp) return 0 ;;
+    *) return 2 ;;
+    esac
+}
+
 # Resolve the nameservers to write to a target. `auto` keeps the old behavior,
 # DHCP remains managed by the target for dynamic IPs, and static IPs pin the
 # servers observed during installer DHCP/RA when DNS mode is `dhcp`.
