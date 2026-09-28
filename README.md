@@ -180,6 +180,7 @@ bash reinstall.sh anolis      7|8|23
 - `--ip-mode auto|dhcp|static` 选择目标系统的 IPv4 获取方式，默认 `auto` 保留现有自动判断；`static` 使用当前采集到的 IP 和网关
 - `--dns-mode auto|dhcp|static` 选择目标系统的 DNS 方式，默认 `auto` 保留现有行为；静态 IP 配合 `dhcp` 时会保存安装期间从 DHCP/RA 获取的 DNS
 - `--dns-servers IP[,IP...]` 设置静态 DNS，支持 IPv4/IPv6 地址，须与 `--dns-mode static` 一起使用
+- `--network-backend auto|systemd-networkd|NetworkManager` 选择目标系统的网络管理器，默认 `auto` 保留发行版原有行为。显式选择目前支持：`systemd-networkd` 用于 Debian/Kali、Ubuntu、Arch、Gentoo、Fedora、NixOS；`NetworkManager` 用于 Alpine、Debian/Kali、Ubuntu、Arch、Gentoo、AOSC、Fedora、openSUSE、NixOS、RHEL 系及 FNOS
 - `--frpc-config PATH` 添加 frpc 内网穿透，参数填配置文件的本地路径或 HTTP 链接
 - `--no-cloud-kernel` 不使用云内核，避免部分机器黑屏/花屏，适用于 Debian、Ubuntu、Alpine、openSUSE
 - `--hold 1` 仅重启到安装环境，不运行安装，用于 SSH 登录验证网络连通性

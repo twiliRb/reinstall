@@ -1,17 +1,28 @@
 #!/bin/sh
 set -eu
 
+contract_shell=sh
+if ! command -v "$contract_shell" >/dev/null 2>&1; then
+    contract_shell=bash
+fi
+command -v "$contract_shell" >/dev/null 2>&1 || {
+    printf 'Neither sh nor bash is available for the container contract.\n' >&2
+    exit 1
+}
+
 run_contract_tests() {
     printf 'CHECKPOINT container-contract/btrfs-target-config: start\n'
-    sh tests/test_reinstall_btrfs_target_config.sh
+    "$contract_shell" tests/test_reinstall_btrfs_target_config.sh
     printf 'CHECKPOINT container-contract/network-policy: start\n'
-    sh tests/test_reinstall_network.sh
+    "$contract_shell" tests/test_reinstall_network.sh
+    printf 'CHECKPOINT container-contract/networkmanager-first-boot: start\n'
+    "$contract_shell" tests/test_fix_eth_name_profiles.sh
     printf 'CHECKPOINT container-contract/network-probe: start\n'
-    sh tests/test_reinstall_network_probe.sh
+    "$contract_shell" tests/test_reinstall_network_probe.sh
     printf 'CHECKPOINT container-contract/ext4-layout: start\n'
-    sh tests/test_reinstall_ext4_layout.sh
+    "$contract_shell" tests/test_reinstall_ext4_layout.sh
     printf 'CHECKPOINT container-contract/ssh-key-writer: start\n'
-    sh tests/test_reinstall_ssh.sh
+    "$contract_shell" tests/test_reinstall_ssh.sh
     printf 'PASS container contract tests\n'
 }
 
@@ -52,12 +63,12 @@ elif command -v zypper >/dev/null 2>&1; then
 elif command -v nix-shell >/dev/null 2>&1; then
     printf 'CHECKPOINT container-contract/dependencies: provisioning=nix-shell packages=gawk,diffutils,coreutils\n'
     exec nix-shell -p gawk diffutils coreutils --run \
-        'sh tests/run_linux_container_contract.sh'
+        'bash tests/run_linux_container_contract.sh'
 elif command -v nix >/dev/null 2>&1; then
     printf 'CHECKPOINT container-contract/dependencies: provisioning=nix-command packages=gawk,diffutils,coreutils\n'
     exec nix --extra-experimental-features 'nix-command flakes' shell \
-        nixpkgs#gawk nixpkgs#diffutils nixpkgs#coreutils --command sh -ec \
-        'sh tests/run_linux_container_contract.sh'
+        nixpkgs#gawk nixpkgs#diffutils nixpkgs#coreutils --command bash -ec \
+        'bash tests/run_linux_container_contract.sh'
 else
     printf 'Cannot install missing container-contract dependencies.\n' >&2
     exit 1

@@ -22,6 +22,7 @@ reinstall_network_set_cli_option() {
     case "$1" in
     --ip-mode) ip_mode=$2 ;;
     --dns-mode) dns_mode=$2 ;;
+    --network-backend) network_backend=$2 ;;
     --dns-servers)
         if [ -n "${dns_servers:-}" ]; then
             dns_servers="$dns_servers,$2"
@@ -33,12 +34,51 @@ reinstall_network_set_cli_option() {
     esac
 }
 
+# Validate the explicit target network manager selection. `auto` preserves the
+# distro's existing behavior and is valid for every target.
+reinstall_network_validate_backend_option() {
+    case "$1" in
+    auto | systemd-networkd | NetworkManager) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# Return 0 when the selected manager is supported by this distro, 1 for a
+# valid but unsupported combination, and 2 for an invalid manager value. This
+# is a distro policy check only; callers remain responsible for installing and
+# configuring the selected service.
+reinstall_network_backend_supported_for_distro() {
+    reinstall_network_validate_backend_option "$1" || return 2
+
+    case "$1:$2" in
+    auto:*) return 0 ;;
+    systemd-networkd:debian | systemd-networkd:kali | systemd-networkd:ubuntu | \
+        systemd-networkd:arch | systemd-networkd:gentoo | systemd-networkd:fedora | \
+        systemd-networkd:nixos)
+        return 0
+        ;;
+    NetworkManager:alpine | NetworkManager:debian | NetworkManager:kali | \
+        NetworkManager:ubuntu | NetworkManager:arch | NetworkManager:gentoo | \
+        NetworkManager:aosc | NetworkManager:fedora | NetworkManager:opensuse | \
+        NetworkManager:nixos | NetworkManager:anolis | NetworkManager:opencloudos | \
+        NetworkManager:centos | NetworkManager:almalinux | NetworkManager:rocky | \
+        NetworkManager:oracle | NetworkManager:openeuler | NetworkManager:redhat | \
+        NetworkManager:fnos)
+        return 0
+        ;;
+    *) return 1 ;;
+    esac
+}
+
 # Validate comma-separated IPv4/IPv6 DNS literals. This intentionally rejects
 # hostnames, zones, whitespace, and shell/config syntax so the values can be
 # used in Linux and Windows target configuration without interpreting them.
 reinstall_network_validate_dns_servers() {
     case "$1" in
     '' | ,* | *, | *,,*) return 1 ;;
+    esac
+    case "$1" in
+    *[!0-9A-Fa-f:.,]*) return 1 ;;
     esac
 
     printf '%s\n' "$1" | awk '
@@ -88,9 +128,373 @@ reinstall_network_validate_dns_servers() {
     '
 }
 
+# Validate an interface identifier before placing it in a network-manager
+# profile. Interface-name matching in systemd-networkd supports globs, so keep
+# the accepted alphabet literal and portable across both output formats.
+reinstall_network_validate_profile_interface() {
+    case "$1" in
+    '') return 0 ;;
+    . | .. | *[!A-Za-z0-9_.:-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 15 ]
+}
+
+reinstall_network_validate_profile_mac() {
+    case "$1" in
+    '') return 0 ;;
+    *:*)
+        printf '%s\n' "$1" | awk -F: '
+            NF != 6 { exit 1 }
+            {
+                for (i = 1; i <= NF; i++) {
+                    if (length($i) != 2 || $i !~ /^[0123456789abcdefABCDEF]+$/) exit 1
+                }
+            }
+        '
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+reinstall_network_validate_profile_ip_literal() {
+    local _reinstall_address=$1 _reinstall_family=$2
+    case "$_reinstall_family:$_reinstall_address" in
+    4:*)
+        case "$_reinstall_address" in *.*) ;; *) return 1 ;; esac
+        case "$_reinstall_address" in *:*) return 1 ;; esac
+        ;;
+    6:*)
+        case "$_reinstall_address" in *:*) ;; *) return 1 ;; esac
+        case "$_reinstall_address" in *.*) return 1 ;; esac
+        ;;
+    *) return 1 ;;
+    esac
+    reinstall_network_validate_dns_servers "$_reinstall_address"
+}
+
+reinstall_network_validate_profile_address_list() {
+    local _reinstall_addresses=$1 _reinstall_family=$2
+    local _reinstall_address _reinstall_literal _reinstall_prefix _reinstall_limit
+    case "$_reinstall_addresses" in
+    '') return 0 ;;
+    ,* | *, | *,,*) return 1 ;;
+    esac
+    case "$_reinstall_family" in
+    4) _reinstall_limit=32 ;;
+    6) _reinstall_limit=128 ;;
+    *) return 1 ;;
+    esac
+
+    (
+        IFS=,
+        set -f
+        for _reinstall_address in $_reinstall_addresses; do
+            case "$_reinstall_address" in
+            */*) ;;
+            *) exit 1 ;;
+            esac
+            case "$_reinstall_address" in
+            */*/*) exit 1 ;;
+            esac
+            _reinstall_literal=${_reinstall_address%/*}
+            _reinstall_prefix=${_reinstall_address#*/}
+            reinstall_network_validate_profile_ip_literal \
+                "$_reinstall_literal" "$_reinstall_family" || exit 1
+            printf '%s\n' "$_reinstall_prefix" |
+                awk -v limit="$_reinstall_limit" \
+                    '$0 ~ /^[0-9]+$/ && $0 + 0 <= limit { valid = 1 } END { exit !valid }' || exit 1
+        done
+    )
+}
+
+reinstall_network_validate_profile_args() {
+    [ "$#" -eq 11 ] || return 1
+    reinstall_network_validate_profile_interface "$1" || return 1
+    reinstall_network_validate_profile_mac "$2" || return 1
+    [ -n "$1" ] || [ -n "$2" ] || return 1
+    case "$3" in auto | manual | disabled) ;; *) return 1 ;; esac
+    case "$6" in auto | dhcp | manual | disabled) ;; *) return 1 ;; esac
+    if [ "$3" = manual ]; then
+        [ -n "$4" ] || return 1
+    fi
+    if [ "$6" = manual ]; then
+        [ -n "$7" ] || return 1
+    fi
+    reinstall_network_validate_profile_address_list "$4" 4 || return 1
+    reinstall_network_validate_profile_address_list "$7" 6 || return 1
+    if [ -n "$5" ]; then
+        reinstall_network_validate_profile_ip_literal "$5" 4 || return 1
+    fi
+    if [ -n "$8" ]; then
+        reinstall_network_validate_profile_ip_literal "$8" 6 || return 1
+    fi
+    if [ -n "$4" ] || [ -n "$5" ]; then
+        [ "$3" != disabled ] || return 1
+    fi
+    if [ -n "$7" ] || [ -n "$8" ]; then
+        [ "$6" != disabled ] || return 1
+    fi
+    if [ -n "$9" ]; then
+        reinstall_network_validate_dns_servers "$9" || return 1
+    fi
+    case "${10}" in true | false) ;; *) return 1 ;; esac
+    case "${11}" in true | false) ;; *) return 1 ;; esac
+    if [ "$6" = disabled ] && [ "${10}" = true ]; then
+        return 1
+    fi
+}
+
+# Apply the selected backend's final target resolver setup without requiring
+# a service manager or package database in the test environment.
+reinstall_network_finalize_resolver() {
+    [ "$#" -eq 2 ] || return 1
+    local _reinstall_root=$1 _reinstall_backend=$2
+
+    case "$_reinstall_backend" in
+    auto) return 0 ;;
+    systemd-networkd)
+        rm -f "$_reinstall_root/etc/resolv.conf" "$_reinstall_root/etc/resolv.conf.orig" || return 1
+        ln -s ../run/systemd/resolve/stub-resolv.conf \
+            "$_reinstall_root/etc/resolv.conf"
+        ;;
+    NetworkManager)
+        rm -f "$_reinstall_root/etc/resolv.conf" "$_reinstall_root/etc/resolv.conf.orig"
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+# Render a persistent systemd-networkd .network profile. All caller-provided
+# fields are validated before any profile bytes are written to stdout.
+reinstall_network_render_networkd_profile() {
+    [ "$#" -eq 11 ] || return 1
+    local _reinstall_interface=$1 _reinstall_mac=$2
+    local _reinstall_ipv4_method=$3 _reinstall_ipv4_addresses=$4
+    local _reinstall_ipv4_gateway=$5 _reinstall_ipv6_method=$6
+    local _reinstall_ipv6_addresses=$7 _reinstall_ipv6_gateway=$8
+    local _reinstall_dns_servers=$9 _reinstall_accept_ra=${10}
+    local _reinstall_ignore_auto_dns=${11} _reinstall_dhcp _reinstall_link_local _reinstall_ra
+    local _reinstall_server
+
+    reinstall_network_validate_profile_args "$@" || return 1
+
+    if [ "$_reinstall_ipv4_method" = auto ] && [ "$_reinstall_ipv6_method" = dhcp ]; then
+        _reinstall_dhcp=yes
+    elif [ "$_reinstall_ipv4_method" = auto ]; then
+        _reinstall_dhcp=ipv4
+    elif [ "$_reinstall_ipv6_method" = dhcp ]; then
+        _reinstall_dhcp=ipv6
+    else
+        _reinstall_dhcp=no
+    fi
+
+    if [ "$_reinstall_ipv4_method" = disabled ] &&
+        [ "$_reinstall_ipv6_method" = disabled ]; then
+        _reinstall_link_local=no
+    elif [ "$_reinstall_ipv4_method" = disabled ]; then
+        _reinstall_link_local=ipv6
+    elif [ "$_reinstall_ipv6_method" = disabled ]; then
+        _reinstall_link_local=ipv4
+    else
+        _reinstall_link_local=yes
+    fi
+    case "$_reinstall_accept_ra" in
+    true) _reinstall_ra=yes ;;
+    false) _reinstall_ra=no ;;
+    esac
+
+    printf '[Match]\n'
+    if [ -z "$_reinstall_mac" ] && [ -n "$_reinstall_interface" ]; then
+        printf 'Name=%s\n' "$_reinstall_interface"
+    fi
+    [ -z "$_reinstall_mac" ] || printf 'MACAddress=%s\n' "$_reinstall_mac"
+    printf '\n[Network]\nDHCP=%s\nLinkLocalAddressing=%s\nIPv6AcceptRA=%s\n' \
+        "$_reinstall_dhcp" "$_reinstall_link_local" "$_reinstall_ra"
+    (
+        IFS=,
+        set -f
+        for _reinstall_server in $_reinstall_ipv4_addresses; do
+            [ -n "$_reinstall_server" ] || continue
+            printf 'Address=%s\n' "$_reinstall_server"
+        done
+        for _reinstall_server in $_reinstall_ipv6_addresses; do
+            [ -n "$_reinstall_server" ] || continue
+            printf 'Address=%s\n' "$_reinstall_server"
+        done
+    )
+    (
+        IFS=,
+        set -f
+        for _reinstall_server in $_reinstall_dns_servers; do
+            [ -n "$_reinstall_server" ] || continue
+            printf 'DNS=%s\n' "$_reinstall_server"
+        done
+    )
+    [ -z "$_reinstall_ipv4_gateway" ] ||
+        printf '\n[Route]\nGateway=%s\nGatewayOnLink=yes\n' "$_reinstall_ipv4_gateway"
+    [ -z "$_reinstall_ipv6_gateway" ] ||
+        printf '\n[Route]\nGateway=%s\nGatewayOnLink=yes\n' "$_reinstall_ipv6_gateway"
+
+    if [ "$_reinstall_ignore_auto_dns" = true ]; then
+        # Older systemd releases (including Debian 10's systemd 241) only
+        # understand the shared [DHCP] section. Keep it alongside the newer
+        # protocol-specific sections below.
+        printf '\n[DHCP]\nUseDNS=no\n'
+        if [ "$_reinstall_ipv4_method" = auto ]; then
+            printf '\n[DHCPv4]\nUseDNS=no\n'
+        fi
+        # Router advertisements can trigger DHCPv6 even without DHCP=ipv6.
+        if [ "$_reinstall_ipv6_method" = dhcp ] || [ "$_reinstall_accept_ra" = true ]; then
+            printf '\n[DHCPv6]\nUseDNS=no\n'
+        fi
+        if [ "$_reinstall_accept_ra" = true ]; then
+            printf '\n[IPv6AcceptRA]\nUseDNS=no\n'
+        fi
+    fi
+}
+
+# Embed a validated networkd profile as a declarative NixOS /etc file. The
+# profile bytes come from reinstall_network_render_networkd_profile; reject
+# Nix interpolation and indented-string delimiters before emitting any Nix.
+reinstall_network_render_nixos_networkd_profile() {
+    [ "$#" -eq 2 ] || return 1
+    local _reinstall_index=$1 _reinstall_profile=$2
+
+    case "$_reinstall_index" in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+    [ -n "$_reinstall_profile" ] || return 1
+    case "$_reinstall_profile" in
+    *'${'* | *"''"*) return 1 ;;
+    esac
+
+    printf "environment.etc.\"systemd/network/10-reinstall-%s.network\".text = ''\n" \
+        "$_reinstall_index"
+    printf '%s\n' "$_reinstall_profile"
+    printf "'';\n"
+}
+
+# Render a NetworkManager .nmconnection keyfile. The keyfile syntax uses one
+# addressN entry per static address and semicolon-delimited DNS lists.
+reinstall_network_render_nm_profile() {
+    [ "$#" -eq 11 ] || return 1
+    local _reinstall_interface=$1 _reinstall_mac=$2
+    local _reinstall_ipv4_method=$3 _reinstall_ipv4_addresses=$4
+    local _reinstall_ipv4_gateway=$5 _reinstall_ipv6_method=$6
+    local _reinstall_ipv6_addresses=$7 _reinstall_ipv6_gateway=$8
+    local _reinstall_dns_servers=$9 _reinstall_accept_ra=${10}
+    local _reinstall_ignore_auto_dns=${11} _reinstall_identifier _reinstall_nm_ipv6_method
+    local _reinstall_dns4 _reinstall_dns6 _reinstall_address
+
+    reinstall_network_validate_profile_args "$@" || return 1
+
+    if [ -n "$_reinstall_interface" ]; then
+        _reinstall_identifier=$_reinstall_interface
+    else
+        _reinstall_identifier=$_reinstall_mac
+    fi
+    case "$_reinstall_ipv6_method" in
+    auto | dhcp) _reinstall_nm_ipv6_method=auto ;;
+    manual | disabled) _reinstall_nm_ipv6_method=$_reinstall_ipv6_method ;;
+    esac
+
+    printf '[connection]\nid=reinstall-%s\ntype=802-3-ethernet\n' \
+        "$_reinstall_identifier"
+    [ -n "$_reinstall_mac" ] || [ -z "$_reinstall_interface" ] ||
+        printf 'interface-name=%s\n' "$_reinstall_interface"
+    printf 'autoconnect=true\n\n'
+
+    if [ -n "$_reinstall_mac" ]; then
+        printf '[802-3-ethernet]\nmac-address=%s\n\n' "$_reinstall_mac"
+    fi
+
+    _reinstall_dns4=$(reinstall_network_filter_dns_servers "$_reinstall_dns_servers" 4 |
+        tr '\n' ';' | sed 's/;$//')
+    _reinstall_dns6=$(reinstall_network_filter_dns_servers "$_reinstall_dns_servers" 6 |
+        tr '\n' ';' | sed 's/;$//')
+
+    printf '[ipv4]\nmethod=%s\n' "$_reinstall_ipv4_method"
+    (
+        IFS=,
+        set -f
+        _reinstall_index=1
+        for _reinstall_address in $_reinstall_ipv4_addresses; do
+            [ -n "$_reinstall_address" ] || continue
+            printf 'address%s=%s\n' "$_reinstall_index" "$_reinstall_address"
+            _reinstall_index=$((_reinstall_index + 1))
+        done
+    )
+    [ -z "$_reinstall_ipv4_gateway" ] ||
+        printf 'gateway=%s\n' "$_reinstall_ipv4_gateway"
+    [ -z "$_reinstall_dns4" ] || printf 'dns=%s;\n' "$_reinstall_dns4"
+    if [ "$_reinstall_ignore_auto_dns" = true ] &&
+        { [ "$_reinstall_ipv4_method" = auto ] || [ "$_reinstall_ipv4_method" = dhcp ]; }; then
+        printf 'ignore-auto-dns=true\n'
+    fi
+
+    printf '\n[ipv6]\nmethod=%s\n' "$_reinstall_nm_ipv6_method"
+    (
+        IFS=,
+        set -f
+        _reinstall_index=1
+        for _reinstall_address in $_reinstall_ipv6_addresses; do
+            [ -n "$_reinstall_address" ] || continue
+            printf 'address%s=%s\n' "$_reinstall_index" "$_reinstall_address"
+            _reinstall_index=$((_reinstall_index + 1))
+        done
+    )
+    [ -z "$_reinstall_ipv6_gateway" ] ||
+        printf 'gateway=%s\n' "$_reinstall_ipv6_gateway"
+    [ -z "$_reinstall_dns6" ] || printf 'dns=%s;\n' "$_reinstall_dns6"
+    if [ "$_reinstall_ignore_auto_dns" = true ] &&
+        { [ "$_reinstall_ipv6_method" = auto ] || [ "$_reinstall_ipv6_method" = dhcp ]; }; then
+        printf 'ignore-auto-dns=true\n'
+    fi
+}
+
+# Render sysctl settings that NetworkManager cannot express in a connection
+# keyfile. Validate every field before emitting any output.
+reinstall_network_render_sysctl_profile() {
+    [ "$#" -eq 3 ] || return 1
+    local _reinstall_interface=$1 _reinstall_accept_ra=$2 _reinstall_autoconf=$3
+    reinstall_network_validate_profile_interface "$_reinstall_interface" || return 1
+    [ -n "$_reinstall_interface" ] || return 1
+    case "$_reinstall_accept_ra" in true | false) ;; *) return 1 ;; esac
+    case "$_reinstall_autoconf" in true | false) ;; *) return 1 ;; esac
+
+    [ "$_reinstall_accept_ra" = false ] &&
+        printf 'net.ipv6.conf.%s.accept_ra=0\n' "$_reinstall_interface"
+    [ "$_reinstall_autoconf" = false ] &&
+        printf 'net.ipv6.conf.%s.autoconf=0\n' "$_reinstall_interface"
+    return 0
+}
+
+# Preserve NetworkManager IPv6 sysctl policy across interface renames by
+# recording the hardware address and applying the per-interface setting once
+# the target's actual device name is available.
+reinstall_network_render_nm_sysctl_map() {
+    [ "$#" -eq 4 ] || return 1
+    local _reinstall_interface=$1 _reinstall_mac=$2
+    local _reinstall_accept_ra=$3 _reinstall_autoconf=$4
+    reinstall_network_validate_profile_interface "$_reinstall_interface" || return 1
+    reinstall_network_validate_profile_mac "$_reinstall_mac" || return 1
+    [ -n "$_reinstall_interface" ] || [ -n "$_reinstall_mac" ] || return 1
+    case "$_reinstall_accept_ra" in true | false) ;; *) return 1 ;; esac
+    case "$_reinstall_autoconf" in true | false) ;; *) return 1 ;; esac
+
+    if [ -n "$_reinstall_mac" ]; then
+        printf 'mac %s %s %s\n' "$_reinstall_mac" \
+            "$_reinstall_accept_ra" "$_reinstall_autoconf"
+    else
+        printf 'name %s %s %s\n' "$_reinstall_interface" \
+        "$_reinstall_accept_ra" "$_reinstall_autoconf"
+    fi
+}
+
 reinstall_network_validate_cli_options() {
     case "${ip_mode:-auto}" in auto | dhcp | static) ;; *) return 1 ;; esac
     case "${dns_mode:-auto}" in auto | dhcp | static) ;; *) return 2 ;; esac
+    reinstall_network_validate_backend_option "${network_backend:-auto}" || return 6
 
     if [ "${dns_mode:-auto}" = static ]; then
         [ -n "${dns_servers:-}" ] || return 3
@@ -482,7 +886,7 @@ reinstall_cmdline_apply_token() {
         extra_addrs | extra_allow_ping | extra_cloud_image | extra_confhome | extra_deb_mirror | \
         extra_dns_mode | extra_dns_servers | extra_elts | extra_force_boot_mode | extra_force_cn | extra_force_old_windows_setup | \
         extra_hold | extra_kernel | extra_link_grub_dir | extra_localtest | extra_main_disk | \
-        extra_filesystem | extra_ip_mode | extra_mirrorlist | extra_no_auto_drivers | extra_no_cloud_kernel | extra_rdp_port | \
+        extra_filesystem | extra_ip_mode | extra_mirrorlist | extra_network_backend | extra_no_auto_drivers | extra_no_cloud_kernel | extra_rdp_port | \
         extra_source_id | extra_ssh_port | extra_username | extra_web_path | extra_web_port) ;;
     *) return 0 ;;
     esac
@@ -517,6 +921,7 @@ reinstall_cmdline_apply_token() {
     extra_mirrorlist) mirrorlist=$_reinstall_value ;;
     extra_no_auto_drivers) no_auto_drivers=$_reinstall_value ;;
     extra_no_cloud_kernel) no_cloud_kernel=$_reinstall_value ;;
+    extra_network_backend) network_backend=$_reinstall_value ;;
     extra_rdp_port) rdp_port=$_reinstall_value ;;
     extra_source_id) source_id=$_reinstall_value ;;
     extra_ssh_port) ssh_port=$_reinstall_value ;;

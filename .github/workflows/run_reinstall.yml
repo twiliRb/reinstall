@@ -48,6 +48,8 @@ jobs:
         run: sh tests/test_reinstall_ssh.sh
       - name: Test network mode policy and configuration
         run: sh tests/test_reinstall_network.sh
+      - name: Test first-boot NetworkManager profile handling
+        run: sh tests/test_fix_eth_name_profiles.sh
       - name: Test initrd DNS and Internet probe isolation
         run: sh tests/test_reinstall_network_probe.sh
       - name: Test smoke checkpoint output contract
@@ -116,12 +118,21 @@ jobs:
         env:
           DISTRO_IMAGE: ${{ matrix.image }}
         run: |
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
-            --workdir /workspace \
-            --entrypoint /bin/sh \
-            "$DISTRO_IMAGE" \
-            tests/run_linux_container_contract.sh
+          if [ "$DISTRO_IMAGE" = nixos/nix:2.35.2 ]; then
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+              --workdir /workspace \
+              --entrypoint bash \
+              "$DISTRO_IMAGE" \
+              -c 'bash tests/run_linux_container_contract.sh'
+          else
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+              --workdir /workspace \
+              --entrypoint /bin/sh \
+              "$DISTRO_IMAGE" \
+              tests/run_linux_container_contract.sh
+          fi
 
   btrfs-install-dry-run:
     name: Btrfs install dry-run
@@ -260,7 +271,7 @@ jobs:
           run_smoke_check 'AlmaLinux' "$source_checkpoint" 'selection=SET FINALOS ALMALINUX' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x almalinux
           run_smoke_check 'Ubuntu' "$source_checkpoint" 'selection=SET FINALOS UBUNTU 26.04' 'image=File type: qemu' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x ubuntu
           run_smoke_check 'Debian' "$source_checkpoint" 'next-os=SET NEXTOS DEBIAN 13' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x debian
-          run_smoke_check 'Debian cloud-init network, SSH key and ext4' "$source_checkpoint" 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'ssh-key=Public Key: ssh-ed25519' 'ssh-port=SSH Port: 2222' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --ssh-key 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj7Ml2PQbt9pkYbcXn6axzAP2ZKZh0PTLg1dp8R5ROy ci@reinstall' --ssh-port 2222 --filesystem ext4 --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
+          run_smoke_check 'Debian NetworkManager, SSH key and ext4' "$source_checkpoint" 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'network-backend=CHECKPOINT network-backend/cmdline: selected=NetworkManager encoded=base64' 'ssh-key=Public Key: ssh-ed25519' 'ssh-port=SSH Port: 2222' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --ssh-key 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj7Ml2PQbt9pkYbcXn6axzAP2ZKZh0PTLg1dp8R5ROy ci@reinstall' --ssh-port 2222 --filesystem ext4 --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 --network-backend NetworkManager debian --ci
           run_smoke_check 'netboot.xyz' 'target=SET NEXTOS NETBOOT.XYZ' 'image-url=https://boot.netboot.xyz/ipxe/netboot.xyz.efi' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh netboot.xyz
           run_smoke_check 'Debian image' "$source_checkpoint" 'selection=SET FINALOS DD' 'image=File type: raw.tar.xz' 'firmware=DD: Image is EFI.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
           run_smoke_check 'Windows image and remote-access ports' "$source_checkpoint" 'selection=SET FINALOS WINDOWS' 'image=File type: iso' 'ssh-port=SSH Port: 2222' 'rdp-port=RDP Port: 3390' 'web-log=WEB: http://IP:8080' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ssh-port 2222 --rdp-port 3390 --web-port 8080 windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
@@ -272,6 +283,8 @@ jobs:
           test_ssh_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj7Ml2PQbt9pkYbcXn6axzAP2ZKZh0PTLg1dp8R5ROy ci@reinstall'
           run_smoke_failure_check 'invalid filesystem' 'Invalid --filesystem value: invalid' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem invalid debian --ci
           run_smoke_failure_check 'unsupported Btrfs target' '--filesystem=btrfs is supported only for Arch, Gentoo, NixOS, and AOSC.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem btrfs debian --ci
+          run_smoke_failure_check 'invalid network backend' 'Invalid --network-backend value: invalid' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --network-backend invalid debian --ci
+          run_smoke_failure_check 'unsupported network backend' '--network-backend=systemd-networkd is not supported for alpine.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --network-backend systemd-networkd alpine --ci
           run_smoke_failure_check 'static DNS without servers' '--dns-mode=static requires --dns-servers.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --dns-mode static debian --ci
           run_smoke_failure_check 'invalid SSH port' 'Invalid --ssh-port value: 0' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ssh-port 0 debian --ci
           run_smoke_failure_check 'password and SSH key conflict' 'Cannot set both password and ssh key.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ssh-key "$test_ssh_key" debian --ci

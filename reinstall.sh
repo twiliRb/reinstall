@@ -113,6 +113,7 @@ Usage: $reinstall_____ anolis      7|8|23
                        [--ip-mode    auto|dhcp|static]
                        [--dns-mode   auto|dhcp|static]
                        [--dns-servers IP[,IP...]] (required for --dns-mode=static)
+                       [--network-backend auto|systemd-networkd|NetworkManager]
 
                        For Windows Only:
                        [--allow-ping]
@@ -3585,6 +3586,11 @@ build_extra_cmdline() {
         extra_cmdline+=" $(reinstall_cmdline_serialize extra_filesystem "$filesystem")"
     fi
 
+    if [ "$network_backend" != auto ]; then
+        extra_cmdline+=" $(reinstall_cmdline_serialize extra_network_backend "$network_backend")"
+        echo "CHECKPOINT network-backend/cmdline: selected=$network_backend encoded=base64"
+    fi
+
     # Values are base64 encoded so the bootloader sees each as one inert word.
     if [ -n "$finalos_mirrorlist" ]; then
         extra_cmdline+=" $(reinstall_cmdline_serialize extra_mirrorlist "$finalos_mirrorlist")"
@@ -4127,6 +4133,9 @@ EOF
         create_ifupdown_config /etc/network/interfaces
         mkdir -p /configs
         cp /etc/network/interfaces /configs/network-interfaces
+        if [ "\$network_backend" != auto ]; then
+            create_network_backend_profiles /configs
+        fi
         echo "CHECKPOINT debian/initrd-network-config: saved selected IP and DNS policy for the installed system"
         exit
 EOF
@@ -4949,6 +4958,7 @@ filesystem=ext4
 ip_mode=auto
 dns_mode=auto
 dns_servers=
+network_backend=auto
 long_opts=
 for o in ci installer debug minimal no-cloud-kernel no-auto-drivers allow-ping force-cn help \
     add-driver: \
@@ -4975,6 +4985,7 @@ for o in ci installer debug minimal no-cloud-kernel no-auto-drivers allow-ping f
     ip-mode: \
     dns-mode: \
     dns-servers: \
+    network-backend: \
     force-old-windows-setup:; do
     [ -n "$long_opts" ] && long_opts+=,
     long_opts+=$o
@@ -5000,6 +5011,10 @@ while true; do
         ;;
     --filesystem)
         filesystem=$2
+        shift 2
+        ;;
+    --network-backend)
+        network_backend=$2
         shift 2
         ;;
     --ip-mode | --dns-mode | --dns-servers)
@@ -5038,6 +5053,18 @@ else
     2) error_and_exit "--filesystem=btrfs is supported only for Arch, Gentoo, NixOS, and AOSC." ;;
     esac
 fi
+if ! reinstall_network_validate_backend_option "$network_backend"; then
+    error_and_exit "Invalid --network-backend value: $network_backend (expected auto, systemd-networkd, or NetworkManager)."
+fi
+if reinstall_network_backend_supported_for_distro "$network_backend" "$distro"; then
+    echo "CHECKPOINT network-backend/preflight: request=$network_backend distro=$distro compatibility=accepted"
+else
+    backend_status=$?
+    case "$backend_status" in
+    1) error_and_exit "--network-backend=$network_backend is not supported for $distro." ;;
+    2) error_and_exit "Invalid --network-backend value: $network_backend (expected auto, systemd-networkd, or NetworkManager)." ;;
+    esac
+fi
 init_bootloader_facts
 
 if [ "$distro" = reset ]; then
@@ -5067,7 +5094,7 @@ while true; do
         filesystem=$2
         shift 2
         ;;
-    --ip-mode | --dns-mode | --dns-servers)
+    --ip-mode | --dns-mode | --dns-servers | --network-backend)
         reinstall_network_set_cli_option "$1" "$2" || error_and_exit "Invalid network option: $1"
         shift 2
         ;;
@@ -5344,6 +5371,7 @@ else
     3) error_and_exit "--dns-mode=static requires --dns-servers." ;;
     4) error_and_exit "Invalid --dns-servers value: expected comma-separated IPv4 or IPv6 addresses." ;;
     5) error_and_exit "--dns-servers can only be used with --dns-mode=static." ;;
+    6) error_and_exit "Invalid --network-backend value: $network_backend (expected auto, systemd-networkd, or NetworkManager)." ;;
     esac
 fi
 

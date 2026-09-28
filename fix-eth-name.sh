@@ -162,18 +162,28 @@ fix_suse_sysconfig() {
 }
 
 fix_network_manager() {
-    for file in /etc/NetworkManager/system-connections/cloud-init-eth*.nmconnection; do
+    network_root=${1:-/}
+    network_connections_dir="${network_root%/}/etc/NetworkManager/system-connections"
+    networkmanager_conf_dir="${network_root%/}/etc/NetworkManager/conf.d"
+
+    for file in \
+        "$network_connections_dir"/cloud-init-eth*.nmconnection \
+        "$network_connections_dir"/reinstall-*.nmconnection; do
         [ -f "$file" ] || continue
         mac=$(grep ^mac-address= "$file" | cut -d= -f2 | grep .) || continue
         ethx=$(get_ethx_by_mac "$mac") || continue
 
-        proper_file=/etc/NetworkManager/system-connections/$ethx.nmconnection
+        case "$file" in
+        "$network_connections_dir"/cloud-init-eth*.nmconnection)
+            proper_file=$network_connections_dir/$ethx.nmconnection
 
-        # 更改文件内容
-        sed -i "s/^id=.*/id=$ethx/" "$file"
+            # 更改文件内容
+            sed -i "s/^id=.*/id=$ethx/" "$file"
 
-        # 更改文件名
-        mv "$file" "$proper_file"
+            # 更改文件名
+            mv "$file" "$proper_file"
+            ;;
+        esac
 
         # NM 不会自动忽略 Azure 的 slave 网卡，需手动设置
         # azure 文档中的方法不够通用，只适合 azure
@@ -182,7 +192,8 @@ fix_network_manager() {
         # 我们采用红帽的方法
         # https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/configuring_and_managing_networking/configuring-networkmanager-to-ignore-certain-devices_configuring-and-managing-networking
         if slave_ethx=$(get_ethx_by_mac "$mac" slave); then
-            cat >"/etc/NetworkManager/conf.d/99-$slave_ethx-unmanaged.conf" <<EOF
+            mkdir -p "$networkmanager_conf_dir"
+            cat >"$networkmanager_conf_dir/99-$slave_ethx-unmanaged.conf" <<EOF
 [device-$slave_ethx-unmanaged]
 match-device=interface-name:$slave_ethx
 managed=0
@@ -192,6 +203,110 @@ EOF
         # 也可以设置 unmanaged-devices, 但是官方文档不推荐
         # https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/NetworkManager.conf.html#:~:text=may%20be%20a-,better%20choice,-.
     done
+
+    sysctl_map_file="${network_root%/}/etc/reinstall/network-sysctl-map"
+    [ -s "$sysctl_map_file" ] || return 0
+    sysctl_tmp_dir=$(mktemp -d) || return 1
+    resolved_sysctl_file=$sysctl_tmp_dir/network-sysctl.conf
+    : >"$resolved_sysctl_file"
+    while IFS=' ' read -r match_type match_value accept_ra autoconf extra; do
+        [ -n "$match_type" ] || continue
+        [ -z "$extra" ] || {
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+        }
+        case "$accept_ra/$autoconf" in
+        true/true | true/false | false/true | false/false) ;;
+        *)
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+            ;;
+        esac
+        case "$match_type" in
+        mac)
+            case "$match_value" in
+            '' | *[!A-Fa-f0-9:]*)
+                rm -rf "$sysctl_tmp_dir"
+                return 1
+                ;;
+            esac
+            ethx=$(get_ethx_by_mac "$match_value") || {
+                rm -rf "$sysctl_tmp_dir"
+                return 1
+            }
+            ;;
+        name)
+            ethx=$match_value
+            ;;
+        *)
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+            ;;
+        esac
+        case "$ethx" in
+        '' | . | .. | *[!A-Za-z0-9_.:-]*)
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+            ;;
+        esac
+
+        if [ "$accept_ra" = false ]; then
+            printf 'net.ipv6.conf.%s.accept_ra=0\n' "$ethx" >>"$resolved_sysctl_file"
+            printf '0\n' >"${network_root%/}/proc/sys/net/ipv6/conf/$ethx/accept_ra" || {
+                rm -rf "$sysctl_tmp_dir"
+                return 1
+            }
+        fi
+        if [ "$autoconf" = false ]; then
+            printf 'net.ipv6.conf.%s.autoconf=0\n' "$ethx" >>"$resolved_sysctl_file"
+            printf '0\n' >"${network_root%/}/proc/sys/net/ipv6/conf/$ethx/autoconf" || {
+                rm -rf "$sysctl_tmp_dir"
+                return 1
+            }
+        fi
+    done <"$sysctl_map_file"
+
+    [ -s "$resolved_sysctl_file" ] || {
+        rm -rf "$sysctl_tmp_dir"
+        rm -f "$sysctl_map_file"
+        return 0
+    }
+    if grep -q '^# BEGIN reinstall network policy$' "${network_root%/}/etc/sysctl.conf" 2>/dev/null; then
+        sysctl_conf="${network_root%/}/etc/sysctl.conf"
+        awk '
+            $0 == "# BEGIN reinstall network policy" { skip = 1; next }
+            $0 == "# END reinstall network policy" { skip = 0; next }
+            !skip { print }
+        ' "$sysctl_conf" >"$sysctl_tmp_dir/sysctl.conf" || {
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+        }
+        {
+            cat "$sysctl_tmp_dir/sysctl.conf"
+            printf '\n# BEGIN reinstall network policy\n'
+            cat "$resolved_sysctl_file"
+            printf '# END reinstall network policy\n'
+        } >"$sysctl_tmp_dir/sysctl.conf.new" || {
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+        }
+        mv "$sysctl_tmp_dir/sysctl.conf.new" "$sysctl_conf" || {
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+        }
+    else
+        mkdir -p "${network_root%/}/etc/sysctl.d" || {
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+        }
+        cat "$resolved_sysctl_file" >"${network_root%/}/etc/sysctl.d/90-reinstall-network.conf" || {
+            rm -rf "$sysctl_tmp_dir"
+            return 1
+        }
+        chmod 644 "${network_root%/}/etc/sysctl.d/90-reinstall-network.conf"
+    fi
+    rm -rf "$sysctl_tmp_dir"
+    rm -f "$sysctl_map_file"
 }
 
 # debian 9 IPV6 onlink 路由需要 post-up

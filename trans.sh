@@ -552,12 +552,23 @@ extract_env_from_cmdline() {
     ip_mode=auto
     dns_mode=auto
     dns_servers=
+    network_backend=auto
     # 提取 finalos/extra 到变量
     reinstall_cmdline_load_file /proc/cmdline all ||
         error_and_exit "Invalid command-line configuration."
 
     if ! reinstall_network_validate_cli_options; then
         error_and_exit "Invalid network mode or DNS server list in command-line configuration."
+    fi
+
+    if reinstall_network_backend_supported_for_distro "$network_backend" "$distro"; then
+        echo "CHECKPOINT network-backend/cmdline: request=$network_backend distro=$distro compatibility=accepted"
+    else
+        backend_status=$?
+        case "$backend_status" in
+        1) error_and_exit "--network-backend=$network_backend is not supported for $distro." ;;
+        2) error_and_exit "Invalid network backend in command-line configuration." ;;
+        esac
     fi
 
     if reinstall_validate_filesystem "$filesystem" "$distro"; then
@@ -1577,6 +1588,39 @@ create_nixos_network_config() {
     conf_file=$1
     true >$conf_file
 
+    if [ "${network_backend:-auto}" = NetworkManager ]; then
+        create_nixos_networkmanager_config "$conf_file"
+        return
+    elif [ "${network_backend:-auto}" = systemd-networkd ]; then
+        cat <<EOF >>$conf_file
+networking.useNetworkd = true;
+networking.useDHCP = false;
+networking.dhcpcd.enable = false;
+networking.usePredictableInterfaceNames = false;
+systemd.network.enable = true;
+services.resolved.enable = true;
+EOF
+
+        if ! (
+            network_profile_root=$(mktemp -d) || exit 1
+            trap 'rm -rf "$network_profile_root"' 0
+            create_network_backend_profiles "$network_profile_root"
+            for network_profile_file in "$network_profile_root"/etc/systemd/network/*.network; do
+                [ -f "$network_profile_file" ] || continue
+                network_profile_name=${network_profile_file##*/}
+                network_profile_index=${network_profile_name#10-reinstall-}
+                network_profile_index=${network_profile_index%.network}
+                network_profile_text=$(cat "$network_profile_file") || exit 1
+                reinstall_network_render_nixos_networkd_profile \
+                    "$network_profile_index" "$network_profile_text" >>"$conf_file" || exit 1
+            done
+        ); then
+            error_and_exit "Failed to generate declarative NixOS systemd-networkd configuration."
+        fi
+        echo "CHECKPOINT nixos/network-backend: manager=systemd-networkd profiles=declarative services=networkd,resolved"
+        return
+    fi
+
     # 头部
     cat <<EOF >>$conf_file
 networking = {
@@ -1587,7 +1631,7 @@ EOF
         # ipv4 使用 DHCP 时显式开启 useDHCP
         if is_dhcpv4; then
             cat <<EOF >>$conf_file
-  interfaces.$ethx.useDHCP = true;
+  interfaces."$ethx".useDHCP = true;
 EOF
         fi
 
@@ -1596,8 +1640,8 @@ EOF
             get_netconf_to ipv4_addr
             get_netconf_to ipv4_gateway
             IFS=/ read -r address prefix < <(echo "$ipv4_addr")
-            cat <<EOF >>$conf_file
-  interfaces.$ethx.ipv4.addresses = [
+cat <<EOF >>$conf_file
+  interfaces."$ethx".ipv4.addresses = [
     {
       address = "$address";
       prefixLength = $prefix;
@@ -1615,8 +1659,8 @@ EOF
             get_netconf_to ipv6_addr
             get_netconf_to ipv6_gateway
             IFS=/ read -r address prefix < <(echo "$ipv6_addr")
-            cat <<EOF >>$conf_file
-  interfaces.$ethx.ipv6.addresses = [
+cat <<EOF >>$conf_file
+  interfaces."$ethx".ipv6.addresses = [
     {
       address = "$address";
       prefixLength = $prefix;
@@ -1640,8 +1684,12 @@ EOF
             fi
         done
         if reinstall_network_should_persist_dns "$dns_mode" "$target_has_static_ip"; then
-            target_dns_list=$(get_current_dns) ||
-                error_and_exit "Failed to resolve the configured target DNS servers."
+            if [ "$dns_mode" = static ]; then
+                target_dns_list=$(printf '%s' "$dns_servers" | tr ',' '\n')
+            else
+                target_dns_list=$(get_current_dns) ||
+                    error_and_exit "Failed to resolve the configured target DNS servers."
+            fi
             if ! reinstall_network_require_target_dns \
                 "$dns_mode" "$target_has_static_ip" "$target_dns_list"; then
                 error_and_exit "No DNS servers were acquired from DHCP/RA for the static target."
@@ -1767,6 +1815,219 @@ persist_alpine_target_dns_policy() {
     fi
 }
 
+create_nixos_networkmanager_config() {
+    local conf_file=$1 ethx mac_addr
+    local ipv4_method ipv4_address= ipv4_gateway= ipv6_method ipv6_addresses= ipv6_gateway=
+    local target_has_static_ip=false target_dns_csv= dns4 dns6 ignore_auto_dns=false
+    local target_dns_list
+    local accept_ra_setting=true autoconf_setting=true mac_addr_lower
+
+    for ethx in $(get_eths); do
+        if is_staticv4 || is_staticv6; then
+            target_has_static_ip=true
+        fi
+    done
+    if [ "${ip_mode:-auto}" = static ] && ! $target_has_static_ip; then
+        error_and_exit "Static IP mode has no captured static address and gateway."
+    fi
+
+    case "${dns_mode:-auto}" in
+    static)
+        target_dns_csv=$dns_servers
+        ignore_auto_dns=true
+        ;;
+    dhcp)
+        if $target_has_static_ip; then
+            target_dns_list=$(get_current_dns) || target_dns_list=
+            if ! reinstall_network_require_target_dns dhcp true "$target_dns_list"; then
+                error_and_exit "No DNS servers were acquired from DHCP/RA for the static target."
+            fi
+            target_dns_csv=$(printf '%s\n' "$target_dns_list" | tr '\n' ',' | sed 's/,$//')
+            ignore_auto_dns=true
+        fi
+        ;;
+    auto)
+        if $target_has_static_ip; then
+            target_dns_list=$(get_current_dns) || target_dns_list=
+            target_dns_csv=$(printf '%s\n' "$target_dns_list" | tr '\n' ',' | sed 's/,$//')
+        fi
+        ;;
+    *) error_and_exit "Invalid DNS mode while rendering NixOS NetworkManager profiles." ;;
+    esac
+
+    dns4=$(reinstall_network_filter_dns_servers "$target_dns_csv" 4 | tr '\n' ';' | sed 's/;$//')
+    dns6=$(reinstall_network_filter_dns_servers "$target_dns_csv" 6 | tr '\n' ';' | sed 's/;$//')
+
+    cat <<EOF >>"$conf_file"
+networking.networkmanager.enable = true;
+networking.dhcpcd.enable = false;
+networking.useDHCP = false;
+networking.usePredictableInterfaceNames = false;
+EOF
+    if [ -n "$dns4$dns6" ]; then
+        # These are required by the target DNS policy when NetworkManager is
+        # selected and a static address or static nameserver is configured.
+        reinstall_network_should_persist_dns "${dns_mode:-auto}" "$target_has_static_ip" &&
+            cat <<EOF >>"$conf_file"
+networking.networkmanager.dns = "none";
+networking.nameservers = [ $(printf '%s\n' "$target_dns_csv" | tr ',' ' ' | quote_word) ];
+EOF
+    fi
+
+    for ethx in $(get_eths); do
+        case "$ethx" in '' | . | .. | *[!A-Za-z0-9_.:-]*) error_and_exit "Invalid network interface name for NixOS NetworkManager profile." ;; esac
+        get_netconf_to mac_addr
+
+        ipv4_method=disabled
+        ipv4_address=
+        ipv4_gateway=
+        if is_dhcpv4; then
+            ipv4_method=auto
+        elif is_staticv4; then
+            get_netconf_to ipv4_addr
+            get_netconf_to ipv4_gateway
+            ipv4_method=manual
+            ipv4_address=$ipv4_addr
+            ipv4_gateway=$ipv4_gateway
+        fi
+
+        ipv6_method=disabled
+        ipv6_addresses=
+        ipv6_gateway=
+        if is_slaac; then
+            ipv6_method=auto
+        elif is_dhcpv6; then
+            # NetworkManager needs RA to install the default route; it starts
+            # DHCPv6 automatically when the router advertises managed mode.
+            ipv6_method=auto
+        elif is_staticv6; then
+            get_netconf_to ipv6_addr
+            get_netconf_to ipv6_gateway
+            ipv6_method=manual
+            ipv6_addresses=$ipv6_addr
+            ipv6_gateway=$ipv6_gateway
+            get_netconf_to ipv6_extra_addrs
+            if [ -n "$ipv6_extra_addrs" ]; then
+                ipv6_addresses="$ipv6_addresses,$ipv6_extra_addrs"
+            fi
+        fi
+
+        # Validate the values through the shared keyfile renderer before
+        # embedding them in the Nix expression.
+        reinstall_network_render_nm_profile \
+            "$ethx" "$mac_addr" "$ipv4_method" "$ipv4_address" "$ipv4_gateway" \
+            "$ipv6_method" "$ipv6_addresses" "$ipv6_gateway" "$target_dns_csv" \
+            false "$ignore_auto_dns" >/dev/null ||
+            error_and_exit "Failed to validate NixOS NetworkManager profile for $ethx."
+
+        cat <<EOF >>"$conf_file"
+networking.networkmanager.ensureProfiles.profiles."reinstall-$ethx" = {
+  connection = {
+    id = "reinstall-$ethx";
+    type = "ethernet";
+  };
+EOF
+        if [ -n "$mac_addr" ]; then
+            printf '  "802-3-ethernet".mac-address = "%s";\n' "$mac_addr" >>"$conf_file"
+        else
+            printf '  connection.interface-name = "%s";\n' "$ethx" >>"$conf_file"
+        fi
+        cat <<EOF >>"$conf_file"
+  ipv4 = {
+    method = "$ipv4_method";
+EOF
+        if [ -n "$ipv4_address" ]; then
+            printf '    address1 = "%s";\n' "$ipv4_address" >>"$conf_file"
+            printf '    gateway = "%s";\n' "$ipv4_gateway" >>"$conf_file"
+        fi
+        if [ -n "$dns4" ]; then
+            printf '    dns = "%s;";\n' "$dns4" >>"$conf_file"
+        fi
+        if [ "$ignore_auto_dns" = true ] && [ "$ipv4_method" = auto ]; then
+            printf '    ignore-auto-dns = true;\n' >>"$conf_file"
+        fi
+        cat <<EOF >>"$conf_file"
+  };
+  ipv6 = {
+    method = "$ipv6_method";
+EOF
+        if [ -n "$ipv6_addresses" ]; then
+            (
+                IFS=,
+                set -f
+                address_index=1
+                for address in $ipv6_addresses; do
+                    printf '    address%s = "%s";\n' "$address_index" "$address" >>"$conf_file"
+                    address_index=$((address_index + 1))
+                done
+            )
+            printf '    gateway = "%s";\n' "$ipv6_gateway" >>"$conf_file"
+        fi
+        if [ -n "$dns6" ]; then
+            printf '    dns = "%s;";\n' "$dns6" >>"$conf_file"
+        fi
+        if [ "$ignore_auto_dns" = true ] && [ "$ipv6_method" = auto ]; then
+            printf '    ignore-auto-dns = true;\n' >>"$conf_file"
+        fi
+        cat <<EOF >>"$conf_file"
+  };
+};
+EOF
+
+        accept_ra_setting=true
+        autoconf_setting=true
+        should_disable_accept_ra && accept_ra_setting=false
+        should_disable_autoconf && autoconf_setting=false
+        if [ "$accept_ra_setting" = false ] || [ "$autoconf_setting" = false ]; then
+            if [ -n "$mac_addr" ]; then
+                mac_addr_lower=$(printf '%s' "$mac_addr" | tr '[:upper:]' '[:lower:]')
+                {
+                    printf 'systemd.services."reinstall-networkmanager-ipv6-policy-%s" = {\n' "$ethx"
+                    cat <<EOF
+  description = "Apply NetworkManager IPv6 policy to the interface matching its MAC address";
+  wantedBy = [ "NetworkManager.service" ];
+  before = [ "NetworkManager.service" ];
+  after = [ "systemd-udev-settle.service" ];
+  path = [ pkgs.coreutils ];
+  serviceConfig.Type = "oneshot";
+  script = ''
+    found=false
+    for address_file in /sys/class/net/*/address; do
+      [ -r "\$address_file" ] || continue
+      current_mac=\$(cat "\$address_file")
+      if [ "''\${current_mac,,}" = "$mac_addr_lower" ]; then
+        device_path=''\${address_file%/address}
+        device=''\${device_path##*/}
+EOF
+                    if [ "$accept_ra_setting" = false ]; then
+                        printf '        printf 0 > "/proc/sys/net/ipv6/conf/$device/accept_ra"\n'
+                    fi
+                    if [ "$autoconf_setting" = false ]; then
+                        printf '        printf 0 > "/proc/sys/net/ipv6/conf/$device/autoconf"\n'
+                    fi
+                    cat <<EOF
+        found=true
+        break
+      fi
+    done
+    [ "\$found" = true ]
+  '';
+};
+EOF
+                } >>"$conf_file"
+            else
+                if [ "$accept_ra_setting" = false ]; then
+                    printf 'boot.kernel.sysctl."net.ipv6.conf.%s.accept_ra" = false;\n' "$ethx" >>"$conf_file"
+                fi
+                if [ "$autoconf_setting" = false ]; then
+                    printf 'boot.kernel.sysctl."net.ipv6.conf.%s.autoconf" = false;\n' "$ethx" >>"$conf_file"
+                fi
+            fi
+        fi
+        echo "CHECKPOINT nixos/network-backend-profile: manager=NetworkManager interface=$ethx ipv4=$ipv4_method ipv6=$ipv6_method dns4=${dns4:-none} dns6=${dns6:-none}"
+    done
+}
+
 install_alpine() {
     info "install alpine"
 
@@ -1807,11 +2068,13 @@ install_alpine() {
         create_swap $swap_size /os/swapfile
     fi
 
-    # 网络配置
-    create_ifupdown_config /etc/network/interfaces
-    echo
-    cat -n /etc/network/interfaces
-    echo
+    # 网络配置：auto 保留 Alpine 默认的 ifupdown + dhcpcd 路径。
+    if [ "${network_backend:-auto}" = auto ]; then
+        create_ifupdown_config /etc/network/interfaces
+        echo
+        cat -n /etc/network/interfaces
+        echo
+    fi
 
     # 在 arm netboot initramfs init 中
     # 如果识别到rtc硬件，就往系统添加hwclock服务，否则添加swclock
@@ -1914,11 +2177,26 @@ install_alpine() {
     # 2 自带rdnss支持
     # 3 唯一要做的是关闭隐私保护
 
-    # 安装 dhcpcd
-    chroot /os apk add dhcpcd
-    persist_alpine_target_dns_policy /os
-    chroot /os sed -i '/^slaac private/s/^/#/' /etc/dhcpcd.conf
-    chroot /os sed -i '/^#slaac hwaddr/s/^#//' /etc/dhcpcd.conf
+    if [ "${network_backend:-auto}" = NetworkManager ]; then
+        chroot /os apk add networkmanager eudev
+        mkdir -p /os/etc/network
+        cat <<'EOF' >/os/etc/network/interfaces
+auto lo
+iface lo inet loopback
+EOF
+        chroot /os rc-update del networking boot || true
+        chroot /os rc-update del dhcpcd default || true
+        chroot /os rc-update add dbus default
+        chroot /os rc-update add NetworkManager default
+        create_network_backend_profiles /os
+        echo "CHECKPOINT network/backend-service: distro=alpine manager=NetworkManager enabled=OpenRC disabled=networking,dhcpcd"
+    else
+        # 安装 dhcpcd
+        chroot /os apk add dhcpcd
+        persist_alpine_target_dns_policy /os
+        chroot /os sed -i '/^slaac private/s/^/#/' /etc/dhcpcd.conf
+        chroot /os sed -i '/^#slaac hwaddr/s/^#//' /etc/dhcpcd.conf
+    fi
 
     # 安装其他部件
     chroot /os setup-keymap us us
@@ -1975,6 +2253,10 @@ install_alpine() {
             swapoff -a
             rm /os/swapfile
         fi
+    fi
+
+    if [ "${network_backend:-auto}" != auto ]; then
+        finalize_network_backend_resolver /os
     fi
 }
 
@@ -2567,12 +2849,19 @@ basic_init() {
 install_arch_gentoo_aosc() {
     info "install $distro"
 
-    network_app=$(
-        case "$distro" in
-        arch | gentoo) echo systemd-networkd ;;
-        aosc) echo network-manager ;;
+    if [ "${network_backend:-auto}" = auto ]; then
+        network_app=$(
+            case "$distro" in
+            arch | gentoo) echo systemd-networkd ;;
+            aosc) echo network-manager ;;
+            esac
+        )
+    else
+        case "$network_backend" in
+        systemd-networkd) network_app=systemd-networkd ;;
+        NetworkManager) network_app=network-manager ;;
         esac
-    )
+    fi
 
     set_locale() {
         echo "C.UTF-8 UTF-8" >>$os_dir/etc/locale.gen
@@ -2623,6 +2912,9 @@ EOF
         # 安装系统
         # 要安装分区工具(包含 fsck.xxx)，用于 initramfs 检查分区数据
         pkgs="base grub openssh"
+        if [ "${network_backend:-auto}" = NetworkManager ]; then
+            pkgs="$pkgs networkmanager"
+        fi
 
         # efi fs
         if is_efi; then
@@ -2825,6 +3117,10 @@ EOF
             pkgs="$pkgs $fw_pkgs"
         fi
 
+        if [ "${network_backend:-auto}" = NetworkManager ]; then
+            pkgs="$pkgs net-misc/networkmanager"
+        fi
+
         # 安装 grub + 内核
         is_efi && grub_platforms="efi-64" || grub_platforms="pc"
         echo GRUB_PLATFORMS=\"$grub_platforms\" >>$os_dir/etc/portage/make.conf
@@ -2896,7 +3192,25 @@ EOF
     fi
 
     # 网络配置
-    case "$network_app" in
+    if [ "${network_backend:-auto}" != auto ]; then
+        create_network_backend_profiles "$os_dir"
+        case "$network_app" in
+        systemd-networkd)
+            chroot "$os_dir" systemctl disable NetworkManager 2>/dev/null || true
+            chroot "$os_dir" systemctl enable systemd-networkd systemd-resolved
+            ;;
+        network-manager)
+            case "$distro" in
+            gentoo) ;; # installed together with the selected Gentoo binpkg set above
+            aosc) chroot "$os_dir" oma install --yes networkmanager ;;
+            esac
+            chroot "$os_dir" systemctl disable systemd-networkd systemd-resolved 2>/dev/null || true
+            chroot "$os_dir" systemctl enable NetworkManager
+            ;;
+        esac
+        echo "CHECKPOINT network/backend-service: distro=$distro manager=$network_backend selected=enabled competing-manager=disabled"
+    else
+        case "$network_app" in
     systemd-networkd)
         chroot $os_dir systemctl enable systemd-networkd
         chroot $os_dir systemctl enable systemd-resolved
@@ -2935,7 +3249,8 @@ EOF
         create_network_manager_config /net.cfg "$os_dir"
         rm /net.cfg
         ;;
-    esac
+        esac
+    fi
 
     # arch gentoo 网络配置是用 alpine cloud-init 生成的
     # cloud-init 版本够新，因此无需修复 onlink 网关
@@ -2987,8 +3302,12 @@ EOF
         chroot "$os_dir" update-initramfs -u
     fi
 
-    # 删除 resolv.conf，不然 systemd-resolved 无法创建软链接
-    rm_resolv_conf $os_dir
+    # Finalize only after target packages and setup commands no longer need DNS.
+    if [ "${network_backend:-auto}" = auto ]; then
+        rm_resolv_conf "$os_dir"
+    else
+        finalize_network_backend_resolver "$os_dir"
+    fi
 
     # 删除 swap
     swapoff -a
@@ -3993,6 +4312,12 @@ rm_resolv_conf() {
     rm -f $os_dir/etc/resolv.conf $os_dir/etc/resolv.conf.orig
 }
 
+finalize_network_backend_resolver() {
+    local os_dir=$1
+    reinstall_network_finalize_resolver "$os_dir" "${network_backend:-auto}" ||
+        error_and_exit "Failed to finalize resolver configuration for ${network_backend:-auto}."
+}
+
 restore_resolv_conf() {
     local os_dir=$1
     if is_file_or_link $os_dir/etc/resolv.conf.orig; then
@@ -4205,6 +4530,183 @@ create_network_manager_config() {
     done
 }
 
+# Render an explicit network manager profile from the network facts captured
+# during boot. The resulting files are shared by Debian's installer initrd
+# handoff and the ordinary target-image installation paths.
+create_network_backend_profiles() {
+    local target_root=$1 backend=${network_backend:-auto} ethx mac_addr
+    local ipv4_method ipv4_addresses ipv4_gateway ipv6_method ipv6_addresses ipv6_gateway
+    local dns_servers_csv= ignore_auto_dns=false accept_ra target_has_static_ip=false
+    local target_dns_list profile_index=0 profile_file sysctl_file= sysctl_map_file= accept_ra_setting=true autoconf_setting=true
+
+    case "$backend" in
+    systemd-networkd | NetworkManager) ;;
+    *) error_and_exit "Cannot render an automatic or invalid network backend profile: $backend" ;;
+    esac
+
+    for ethx in $(get_eths); do
+        if is_staticv4 || is_staticv6; then
+            target_has_static_ip=true
+        fi
+    done
+    if [ "${ip_mode:-auto}" = static ] && ! $target_has_static_ip; then
+        error_and_exit "Static IP mode has no captured static address and gateway."
+    fi
+
+    if [ "$backend" = NetworkManager ]; then
+        sysctl_map_file="$target_root/etc/reinstall/network-sysctl-map"
+        mkdir -p "$(dirname "$sysctl_map_file")"
+        : >"$sysctl_map_file"
+        if [ "$distro" = alpine ]; then
+            sysctl_file="$target_root/etc/sysctl.conf"
+            mkdir -p "$(dirname "$sysctl_file")"
+            [ -f "$sysctl_file" ] || : >"$sysctl_file"
+            sed -i '/^# BEGIN reinstall network policy$/,/^# END reinstall network policy$/d' "$sysctl_file"
+            printf '\n# BEGIN reinstall network policy\n' >>"$sysctl_file"
+        else
+            sysctl_file="$target_root/etc/sysctl.d/90-reinstall-network.conf"
+            mkdir -p "$(dirname "$sysctl_file")"
+            : >"$sysctl_file"
+        fi
+    fi
+
+    for ethx in $(get_eths); do
+        case "$ethx" in
+        '' | . | .. | *[!A-Za-z0-9_.:-]*)
+            error_and_exit "Invalid network interface name for profile generation."
+            ;;
+        esac
+
+        get_netconf_to mac_addr
+
+        ipv4_method=disabled
+        ipv4_addresses=
+        ipv4_gateway=
+        if is_dhcpv4; then
+            ipv4_method=auto
+        elif is_staticv4; then
+            get_netconf_to ipv4_addr
+            get_netconf_to ipv4_gateway
+            ipv4_method=manual
+            ipv4_addresses=$ipv4_addr
+        fi
+
+        ipv6_method=disabled
+        ipv6_addresses=
+        ipv6_gateway=
+        if is_slaac; then
+            ipv6_method=auto
+        elif is_dhcpv6; then
+            ipv6_method=dhcp
+        elif is_staticv6; then
+            get_netconf_to ipv6_addr
+            get_netconf_to ipv6_gateway
+            ipv6_method=manual
+            ipv6_addresses=$ipv6_addr
+            get_netconf_to ipv6_extra_addrs
+            if [ -n "$ipv6_extra_addrs" ]; then
+                ipv6_addresses="$ipv6_addresses,$ipv6_extra_addrs"
+            fi
+        fi
+
+        if [ "$ipv6_method" = disabled ] || should_disable_accept_ra; then
+            accept_ra=false
+        else
+            accept_ra=true
+        fi
+
+        case "${dns_mode:-auto}" in
+        static)
+            dns_servers_csv=$dns_servers
+            ignore_auto_dns=true
+            ;;
+        dhcp)
+            if $target_has_static_ip; then
+                target_dns_list=$(get_current_dns) || target_dns_list=
+                if ! reinstall_network_require_target_dns dhcp true "$target_dns_list"; then
+                    error_and_exit "No DNS servers were acquired from DHCP/RA for the static target."
+                fi
+                dns_servers_csv=$(printf '%s\n' "$target_dns_list" | tr '\n' ',' | sed 's/,$//')
+                ignore_auto_dns=true
+            else
+                dns_servers_csv=
+                ignore_auto_dns=false
+            fi
+            ;;
+        auto)
+            if $target_has_static_ip; then
+                target_dns_list=$(get_current_dns) || target_dns_list=
+                dns_servers_csv=$(printf '%s\n' "$target_dns_list" | tr '\n' ',' | sed 's/,$//')
+            else
+                dns_servers_csv=
+            fi
+            ignore_auto_dns=false
+            ;;
+        *) error_and_exit "Invalid DNS mode while rendering network profiles." ;;
+        esac
+
+        if [ "$backend" = systemd-networkd ]; then
+            profile_file="$target_root/etc/systemd/network/10-reinstall-$profile_index.network"
+            mkdir -p "$(dirname "$profile_file")"
+            reinstall_network_render_networkd_profile \
+                "$ethx" "$mac_addr" "$ipv4_method" "$ipv4_addresses" "$ipv4_gateway" \
+                "$ipv6_method" "$ipv6_addresses" "$ipv6_gateway" "$dns_servers_csv" \
+                "$accept_ra" "$ignore_auto_dns" >"$profile_file" ||
+                error_and_exit "Failed to render systemd-networkd profile for $ethx."
+        else
+            profile_file="$target_root/etc/NetworkManager/system-connections/reinstall-$profile_index.nmconnection"
+            mkdir -p "$(dirname "$profile_file")"
+            reinstall_network_render_nm_profile \
+                "$ethx" "$mac_addr" "$ipv4_method" "$ipv4_addresses" "$ipv4_gateway" \
+                "$ipv6_method" "$ipv6_addresses" "$ipv6_gateway" "$dns_servers_csv" \
+                "$accept_ra" "$ignore_auto_dns" >"$profile_file" ||
+                error_and_exit "Failed to render NetworkManager profile for $ethx."
+            chmod 600 "$profile_file"
+
+            accept_ra_setting=true
+            autoconf_setting=true
+            should_disable_accept_ra && accept_ra_setting=false
+            should_disable_autoconf && autoconf_setting=false
+            if [ "$accept_ra_setting" = false ] || [ "$autoconf_setting" = false ]; then
+                reinstall_network_render_nm_sysctl_map \
+                    "$ethx" "$mac_addr" "$accept_ra_setting" "$autoconf_setting" \
+                    >>"$sysctl_map_file" ||
+                    error_and_exit "Failed to render NetworkManager sysctl policy for $ethx."
+            fi
+        fi
+        echo "CHECKPOINT network/backend-profile: manager=$backend interface=$ethx ipv4=$ipv4_method ipv6=$ipv6_method dns-policy=${dns_mode:-auto}"
+        cat -n "$profile_file"
+        profile_index=$((profile_index + 1))
+    done
+
+    [ "$profile_index" -gt 0 ] || error_and_exit "No network interfaces found for the selected backend."
+    if [ -n "$sysctl_file" ]; then
+        if [ "$distro" = alpine ]; then
+            printf '# END reinstall network policy\n' >>"$sysctl_file"
+            if grep -q '^net\.ipv6\.conf\..*\.\(accept_ra\|autoconf\)=0$' "$sysctl_file" ||
+                [ -s "$sysctl_map_file" ]; then
+                chroot "$target_root" rc-update add sysctl boot
+                echo "CHECKPOINT network/backend-sysctl: distro=alpine manager=NetworkManager persistence=/etc/sysctl.conf service=sysctl"
+            else
+                sed -i '/^# BEGIN reinstall network policy$/,/^# END reinstall network policy$/d' "$sysctl_file"
+            fi
+        elif [ -s "$sysctl_file" ]; then
+            chmod 644 "$sysctl_file"
+            echo "CHECKPOINT network/backend-sysctl: distro=$distro manager=NetworkManager persistence=/etc/sysctl.d/90-reinstall-network.conf"
+        else
+            rm -f "$sysctl_file"
+        fi
+    fi
+    if [ -n "$sysctl_map_file" ]; then
+        if [ -s "$sysctl_map_file" ]; then
+            chmod 600 "$sysctl_map_file"
+            echo "CHECKPOINT network/backend-sysctl-map: manager=NetworkManager mapping=MAC-or-name resolve=first-boot"
+        else
+            rm -f "$sysctl_map_file"
+        fi
+    fi
+}
+
 modify_linux() {
     local os_dir=$1
     info "Modify Linux"
@@ -4252,10 +4754,27 @@ EOF
 
         cp_resolv_conf $os_dir
 
-        # 可以直接用 alpine 的 cloud-init 生成 Network Manager 配置
-        create_cloud_init_network_config /net.cfg
-        create_network_manager_config /net.cfg "$os_dir"
-        rm /net.cfg
+        if [ "${network_backend:-auto}" = auto ]; then
+            # Keep Fedora's existing cloud-init NetworkManager behavior.
+            create_cloud_init_network_config /net.cfg
+            create_network_manager_config /net.cfg "$os_dir"
+            rm /net.cfg
+        else
+            create_network_backend_profiles "$os_dir"
+            case "$network_backend" in
+            systemd-networkd)
+                chroot_dnf install systemd-networkd systemd-resolved
+                chroot "$os_dir" systemctl disable NetworkManager 2>/dev/null || true
+                chroot "$os_dir" systemctl enable systemd-networkd systemd-resolved
+                ;;
+            NetworkManager)
+                chroot_dnf install NetworkManager
+                chroot "$os_dir" systemctl disable systemd-networkd systemd-resolved 2>/dev/null || true
+                chroot "$os_dir" systemctl enable NetworkManager
+                ;;
+            esac
+            echo "CHECKPOINT fedora/network-backend: manager=$network_backend profiles=installed competing-manager=disabled"
+        fi
 
         # TODO: fedora 43 eol 后删除
         # 删除 cloud-init 会删除依赖包 netcat
@@ -4280,7 +4799,9 @@ EOF
             chroot $os_dir $mgr install -y $fw_pkgs
         fi
 
-        restore_resolv_conf $os_dir
+        if [ "${network_backend:-auto}" = auto ]; then
+            restore_resolv_conf "$os_dir"
+        fi
     fi
 
     # debian
@@ -4423,31 +4944,47 @@ EOF
             fi
         fi
 
-        create_ifupdown_config $os_dir/etc/network/interfaces
+        if [ "${network_backend:-auto}" = auto ]; then
+            create_ifupdown_config $os_dir/etc/network/interfaces
 
-        # ifupdown 不支持 rdnss
-        # 但 iso 安装不会安装 rdnssd，而是在安装时读取 rdnss 并写入 resolv.conf
-        if false; then
-            chroot_apt_install $os_dir rdnssd
+            # ifupdown 不支持 rdnss
+            # 但 iso 安装不会安装 rdnssd，而是在安装时读取 rdnss 并写入 resolv.conf
+            if false; then
+                chroot_apt_install $os_dir rdnssd
+            fi
+
+            # 服务不存在时会报错
+            chroot $os_dir systemctl disable resolvconf systemd-networkd systemd-resolved 2>/dev/null || true
+
+            chroot_apt_install $os_dir ifupdown
+            chroot_apt_remove $os_dir resolvconf netplan.io systemd-resolved
+            chroot_apt_autoremove $os_dir
+            chroot $os_dir systemctl enable networking
+
+            # 静态时 networking 服务不会根据 /etc/network/interfaces 更新 resolv.conf
+            # 动态时使用了 isc-dhcp-client 支持自动更新 resolv.conf
+            # 另外 debian iso 不会安装 rdnssd
+            keep_now_resolv_conf $os_dir
+        else
+            mkdir -p "$os_dir/etc/network"
+            printf 'auto lo\niface lo inet loopback\n' >"$os_dir/etc/network/interfaces"
+            create_network_backend_profiles "$os_dir"
+            rm -f "$os_dir"/etc/netplan/*.yaml
+
+            case "$network_backend" in
+            systemd-networkd)
+                ensure_apt_systemd_resolved "$os_dir"
+                chroot "$os_dir" systemctl disable NetworkManager networking resolvconf 2>/dev/null || true
+                chroot "$os_dir" systemctl enable systemd-networkd systemd-resolved
+                ;;
+            NetworkManager)
+                chroot_apt_install "$os_dir" network-manager
+                chroot "$os_dir" systemctl disable systemd-networkd systemd-resolved networking resolvconf 2>/dev/null || true
+                chroot "$os_dir" systemctl enable NetworkManager
+                ;;
+            esac
+            echo "CHECKPOINT debian/cloud-network-backend: manager=$network_backend profiles=installed competing-network-config=disabled"
         fi
-
-        # debian 10 11 云镜像安装了 resolvconf
-        # debian 12 云镜像安装了 netplan systemd-resolved
-        # 云镜像用了 cloud-init 自动配置网络，用户是无感的，因此官方云镜像可以随便选择网络管理器
-        # 但我们的系统安装后用户可能有手动配置网络的需求，因此用回 iso 安装时的网络管理器 ifupdown
-
-        # 服务不存在时会报错
-        chroot $os_dir systemctl disable resolvconf systemd-networkd systemd-resolved 2>/dev/null || true
-
-        chroot_apt_install $os_dir ifupdown
-        chroot_apt_remove $os_dir resolvconf netplan.io systemd-resolved
-        chroot_apt_autoremove $os_dir
-        chroot $os_dir systemctl enable networking
-
-        # 静态时 networking 服务不会根据 /etc/network/interfaces 更新 resolv.conf
-        # 动态时使用了 isc-dhcp-client 支持自动更新 resolv.conf
-        # 另外 debian iso 不会安装 rdnssd
-        keep_now_resolv_conf $os_dir
     fi
 
     # opensuse
@@ -4466,11 +5003,18 @@ EOF
         # 禁用 selinux
         disable_selinux $os_dir
 
-        # opensuse leap 16.0 / tumbleweed 用 NetworkManager
-        # 可以直接用 alpine 的 cloud-init 生成 Network Manager 配置
-        create_cloud_init_network_config /net.cfg
-        create_network_manager_config /net.cfg "$os_dir"
-        rm /net.cfg
+        # openSUSE only accepts NetworkManager as the explicit backend.
+        if [ "${network_backend:-auto}" = auto ]; then
+            create_cloud_init_network_config /net.cfg
+            create_network_manager_config /net.cfg "$os_dir"
+            rm /net.cfg
+        else
+            create_network_backend_profiles "$os_dir"
+            chroot "$os_dir" zypper --non-interactive install NetworkManager
+            chroot "$os_dir" systemctl disable wicked systemd-networkd systemd-resolved 2>/dev/null || true
+            chroot "$os_dir" systemctl enable NetworkManager
+            echo "CHECKPOINT opensuse/network-backend: manager=NetworkManager profiles=installed competing-manager=disabled"
+        fi
 
         # 选择新内核
         if [ "$no_cloud_kernel" = 1 ]; then
@@ -4529,7 +5073,9 @@ EOF
         # 因为生成 sysconfig 网络配置要用目标系统的 cloud-init
         remove_or_disable_cloud_init $os_dir
 
-        restore_resolv_conf $os_dir
+        if [ "${network_backend:-auto}" = auto ]; then
+            restore_resolv_conf "$os_dir"
+        fi
     fi
 
     # arch 云镜像
@@ -4597,6 +5143,10 @@ EOF
     # 查看 cloud-init 最终配置
     if [ -f "$ci_file" ]; then
         cat -n "$ci_file"
+    fi
+
+    if [ "${network_backend:-auto}" != auto ]; then
+        finalize_network_backend_resolver "$os_dir"
     fi
 
     # 删除 swap
@@ -5338,6 +5888,27 @@ chroot_apt_install() {
     fi
 }
 
+ensure_apt_systemd_resolved() {
+    local os_dir=$1
+    local unit_file
+
+    for unit_file in \
+        "$os_dir/usr/lib/systemd/system/systemd-resolved.service" \
+        "$os_dir/lib/systemd/system/systemd-resolved.service"; do
+        [ -f "$unit_file" ] && return 0
+    done
+
+    chroot_apt_install "$os_dir" systemd-resolved
+
+    for unit_file in \
+        "$os_dir/usr/lib/systemd/system/systemd-resolved.service" \
+        "$os_dir/lib/systemd/system/systemd-resolved.service"; do
+        [ -f "$unit_file" ] && return 0
+    done
+
+    error_and_exit "systemd-resolved.service is unavailable in $os_dir after package setup."
+}
+
 chroot_apt_remove() {
     local os_dir=$1
     shift
@@ -5596,15 +6167,28 @@ install_fnos() {
     chroot $os_dir update-grub
 
     # 网卡配置
-    create_cloud_init_network_config /net.cfg
-    create_network_manager_config /net.cfg $os_dir
-    rm /net.cfg
+    if [ "${network_backend:-auto}" = auto ]; then
+        create_cloud_init_network_config /net.cfg
+        create_network_manager_config /net.cfg $os_dir
+        rm /net.cfg
+    else
+        cp_resolv_conf "$os_dir"
+        create_network_backend_profiles "$os_dir"
+        chroot_apt_install "$os_dir" network-manager
+        chroot "$os_dir" systemctl disable systemd-networkd systemd-resolved 2>/dev/null || true
+        chroot "$os_dir" systemctl enable NetworkManager
+        echo "CHECKPOINT fnos/network-backend: manager=NetworkManager profiles=installed competing-manager=disabled"
+    fi
 
     # 修正网卡名
     add_fix_eth_name_systemd_service $os_dir
 
     # frpc
     add_frpc_systemd_service_if_need $os_dir
+
+    if [ "${network_backend:-auto}" != auto ]; then
+        finalize_network_backend_resolver "$os_dir"
+    fi
 }
 
 install_qcow_by_copy() {
@@ -5619,6 +6203,17 @@ install_qcow_by_copy() {
 
         # 部分镜像有默认配置，例如 centos
         del_exist_sysconfig_NetworkManager_config /os
+
+        if [ "${network_backend:-auto}" = NetworkManager ]; then
+            create_network_backend_profiles "$os_dir"
+            if ! [ -f "$os_dir/usr/lib/systemd/system/NetworkManager.service" ] &&
+                ! [ -f "$os_dir/lib/systemd/system/NetworkManager.service" ]; then
+                chroot_dnf install NetworkManager
+            fi
+            chroot "$os_dir" systemctl disable network systemd-networkd systemd-resolved 2>/dev/null || true
+            chroot "$os_dir" systemctl enable NetworkManager
+            echo "CHECKPOINT rhel/network-backend: manager=NetworkManager profiles=installed competing-manager=disabled"
+        fi
 
         # 删除镜像的默认账户，防止使用默认账户密码登录 ssh
         del_default_user /os
@@ -5811,7 +6406,9 @@ EOF
         # 网络配置
         # el7/8 sysconfig
         # el9 network-manager
-        if [ -f $os_dir/etc/sysconfig/network-scripts/ifup-eth ]; then
+        if [ "${network_backend:-auto}" != auto ]; then
+            info "Use explicit NetworkManager profiles"
+        elif [ -f "$os_dir/etc/sysconfig/network-scripts/ifup-eth" ]; then
             # sysconfig
             info 'sysconfig'
 
@@ -5907,7 +6504,9 @@ EOF
         fi
 
         # 不删除可能网络管理器不会写入dns
-        rm_resolv_conf /os
+        if [ "${network_backend:-auto}" = auto ]; then
+            rm_resolv_conf /os
+        fi
     }
 
     modify_ubuntu() {
@@ -5987,33 +6586,45 @@ EOF
             chroot_apt_install $os_dir $fw_pkgs
         fi
 
-        # 网络配置
-        # 18.04+ netplan
-        # 避免删除 cloud-init 后，minimal 镜像的 netplan.io 被 autoremove
-        chroot $os_dir apt-mark manual netplan.io
+        # 网络配置。auto 保留现有 Netplan/cloud-init 行为；显式选择时
+        # 使用共享 profile renderer，并移除 Netplan 文件以避免双重接管。
+        if [ "${network_backend:-auto}" = auto ]; then
+            # 18.04+ netplan
+            # 避免删除 cloud-init 后，minimal 镜像的 netplan.io 被 autoremove
+            chroot $os_dir apt-mark manual netplan.io
+            create_cloud_init_network_config $os_dir/net.cfg
 
-        # 生成 cloud-init 网络配置
-        create_cloud_init_network_config $os_dir/net.cfg
-
-        # ubuntu 18.04 cloud-init 版本 23.1.2，因此不用处理 onlink
-
-        # 如果不是输出到 / 则不会生成 50-cloud-init.yaml
-        # 注意比较多了什么东西
-        if false; then
-            chroot $os_dir cloud-init devel net-convert \
-                -p /net.cfg -k yaml -d /out -D ubuntu -O netplan
-            sed -Ei "/^[[:space:]]+set-name:/d" $os_dir/out/etc/netplan/50-cloud-init.yaml
-            cp $os_dir/out/etc/netplan/50-cloud-init.yaml $os_dir/etc/netplan/
-
-            # 清理
-            rm -rf $os_dir/net.cfg $os_dir/out
+            # ubuntu 18.04 cloud-init 版本 23.1.2，因此不用处理 onlink
+            if false; then
+                chroot $os_dir cloud-init devel net-convert \
+                    -p /net.cfg -k yaml -d /out -D ubuntu -O netplan
+                sed -Ei "/^[[:space:]]+set-name:/d" $os_dir/out/etc/netplan/50-cloud-init.yaml
+                cp $os_dir/out/etc/netplan/50-cloud-init.yaml $os_dir/etc/netplan/
+                rm -rf $os_dir/net.cfg $os_dir/out
+            else
+                chroot $os_dir cloud-init devel net-convert \
+                    -p /net.cfg -k yaml -d / -D ubuntu -O netplan
+                sed -Ei "/^[[:space:]]+set-name:/d" $os_dir/etc/netplan/50-cloud-init.yaml
+                rm -rf $os_dir/net.cfg
+            fi
         else
-            chroot $os_dir cloud-init devel net-convert \
-                -p /net.cfg -k yaml -d / -D ubuntu -O netplan
-            sed -Ei "/^[[:space:]]+set-name:/d" $os_dir/etc/netplan/50-cloud-init.yaml
-
-            # 清理
-            rm -rf $os_dir/net.cfg
+            mkdir -p "$os_dir/etc/network"
+            printf 'auto lo\niface lo inet loopback\n' >"$os_dir/etc/network/interfaces"
+            create_network_backend_profiles "$os_dir"
+            rm -f "$os_dir"/etc/netplan/*.yaml
+            case "$network_backend" in
+            systemd-networkd)
+                ensure_apt_systemd_resolved "$os_dir"
+                chroot "$os_dir" systemctl disable NetworkManager networking 2>/dev/null || true
+                chroot "$os_dir" systemctl enable systemd-networkd systemd-resolved
+                ;;
+            NetworkManager)
+                chroot_apt_install "$os_dir" network-manager
+                chroot "$os_dir" systemctl disable systemd-networkd systemd-resolved networking 2>/dev/null || true
+                chroot "$os_dir" systemctl enable NetworkManager
+                ;;
+            esac
+            echo "CHECKPOINT ubuntu/network-backend: manager=$network_backend profiles=installed competing-network-config=disabled"
         fi
 
         # 自带的 60-cloudimg-settings.conf 禁止了 PasswordAuthentication
@@ -6071,7 +6682,9 @@ EOF
             sed -i '/[[:space:]]\/boot\/efi[[:space:]]/d' $os_dir/etc/fstab
         fi
 
-        restore_resolv_conf $os_dir
+        if [ "${network_backend:-auto}" = auto ]; then
+            restore_resolv_conf "$os_dir"
+        fi
     }
 
     efi_mount_opts=$(
@@ -6306,6 +6919,10 @@ EOF
     # 最后才删除 cloud-init
     # 因为生成 netplan/sysconfig 网络配置要用目标系统的 cloud-init
     remove_or_disable_cloud_init /os
+
+    if [ "${network_backend:-auto}" != auto ]; then
+        finalize_network_backend_resolver /os
+    fi
 
     # 删除 swapfile
     swapoff -a

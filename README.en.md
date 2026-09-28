@@ -179,6 +179,7 @@ bash reinstall.sh anolis      7|8|23
 - `--ip-mode auto|dhcp|static` Select the target IPv4 mode. `auto` keeps the existing automatic choice; `static` reuses the collected address and gateway.
 - `--dns-mode auto|dhcp|static` Select the target DNS mode. `auto` keeps existing behavior; with a static IP and `dhcp`, DNS servers learned during installation are saved.
 - `--dns-servers IP[,IP...]` Set static DNS servers using IPv4 and/or IPv6 addresses; requires `--dns-mode static`.
+- `--network-backend auto|systemd-networkd|NetworkManager` Select the target network manager. The default `auto` preserves each distribution's existing behavior. Explicit `systemd-networkd` is supported on Debian/Kali, Ubuntu, Arch, Gentoo, Fedora and NixOS; `NetworkManager` is supported on Alpine, Debian/Kali, Ubuntu, Arch, Gentoo, AOSC, Fedora, openSUSE, NixOS, RHEL-family systems and FNOS.
 - `--frpc-config PATH` Add frpc for intranet tunneling. Parameter can be local filepath or HTTP URL of the configuration file.
 - `--no-cloud-kernel` Avoid using cloud kernel to prevent black or glitch screens on certain machines; applicable to Debian, Ubuntu, Alpine and openSUSE.
 - `--hold 1` Reboot only into install environment, without running installer, only for SSH connect to test network connection.
