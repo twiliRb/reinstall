@@ -177,6 +177,9 @@ bash reinstall.sh anolis      7|8|23
 - `--ssh-port PORT` 修改 SSH 端口
 - `--web-port PORT` 修改 Web 端口（安装期间观察日志用）
 - `--filesystem ext4|btrfs` 选择根文件系统，默认 `ext4`。首版 Btrfs 仅支持 Arch、Gentoo、NixOS、AOSC：`/` 使用 `@` 子卷并启用 `compress=zstd`，`/boot` 使用 `@boot` 子卷且关闭压缩；UEFI 的 ESP 挂载在 `/efi`
+- `--ip-mode auto|dhcp|static` 选择目标系统的 IPv4 获取方式，默认 `auto` 保留现有自动判断；`static` 使用当前采集到的 IP 和网关
+- `--dns-mode auto|dhcp|static` 选择目标系统的 DNS 方式，默认 `auto` 保留现有行为；静态 IP 配合 `dhcp` 时会保存安装期间从 DHCP/RA 获取的 DNS
+- `--dns-servers IP[,IP...]` 设置静态 DNS，支持 IPv4/IPv6 地址，须与 `--dns-mode static` 一起使用
 - `--frpc-config PATH` 添加 frpc 内网穿透，参数填配置文件的本地路径或 HTTP 链接
 - `--no-cloud-kernel` 不使用云内核，避免部分机器黑屏/花屏，适用于 Debian、Ubuntu、Alpine、openSUSE
 - `--hold 1` 仅重启到安装环境，不运行安装，用于 SSH 登录验证网络连通性
@@ -251,6 +254,9 @@ bash reinstall.sh dd --img "https://example.com/xxx.xz"
 - `--ssh-key KEY` 设置 SSH 登录公钥（安装期间观察日志用），[格式如下](#--ssh-key)。当使用公钥时，密码为空
 - `--ssh-port PORT` 修改 SSH 端口（安装期间观察日志用）
 - `--rdp-port PORT` 修改 RDP 端口（仅限 DD Windows）
+- `--ip-mode auto|dhcp|static` 选择 DD Windows 的目标 IPv4 获取方式，默认 `auto`
+- `--dns-mode auto|dhcp|static` 选择 DD Windows 的目标 DNS 方式；静态 IP 配合 `dhcp` 时保存安装期间获取的 DNS
+- `--dns-servers IP[,IP...]` 设置 DD Windows 的静态 DNS，须与 `--dns-mode static` 一起使用
 - `--web-port PORT` 修改 Web 端口（安装期间观察日志用）
 - `--allow-ping` 设置 Windows 防火墙允许被 Ping（仅限 DD Windows）
 - `--frpc-config PATH` 添加 frpc 内网穿透（仅限 DD Windows），参数填配置文件的本地路径或 HTTP 链接
@@ -569,6 +575,9 @@ bash reinstall.sh windows \
 - `--rdp-port PORT` 修改 RDP 端口
 - `--ssh-port PORT` 修改 SSH 端口（安装期间观察日志用）
 - `--web-port PORT` 修改 Web 端口（安装期间观察日志用）
+- `--ip-mode auto|dhcp|static` 选择 Windows 目标系统的 IPv4 获取方式，默认 `auto`
+- `--dns-mode auto|dhcp|static` 选择 Windows 目标系统的 DNS 方式；静态 IP 配合 `dhcp` 时保存安装期间获取的 DNS
+- `--dns-servers IP[,IP...]` 设置 Windows 的静态 DNS，须与 `--dns-mode static` 一起使用
 - `--allow-ping` 设置 Windows 防火墙允许被 Ping
 - `--add-driver INF_OR_DIR` 添加额外驱动，填写 .inf 路径，或者 .inf 所在的文件夹
   - 需先下载驱动到当前系统

@@ -110,6 +110,9 @@ Usage: $reinstall_____ anolis      7|8|23
                        [--web-port    PORT]
                        [--frpc-config PATH]
                        [--filesystem  ext4|btrfs] (Btrfs: Arch/Gentoo/NixOS/AOSC)
+                       [--ip-mode    auto|dhcp|static]
+                       [--dns-mode   auto|dhcp|static]
+                       [--dns-servers IP[,IP...]] (required for --dns-mode=static)
 
                        For Windows Only:
                        [--allow-ping]
@@ -3570,7 +3573,7 @@ build_extra_cmdline() {
     # https://answers.launchpad.net/ubuntu/+question/249456
     # https://salsa.debian.org/installer-team/rootskel/-/blob/master/src/lib/debian-installer-startup.d/S02module-params?ref_type=heads
     for key in confhome hold force_boot_mode force_cn force_old_windows_setup cloud_image no_cloud_kernel no_auto_drivers main_disk \
-        elts deb_mirror \
+        elts deb_mirror ip_mode dns_mode dns_servers \
         username ssh_port rdp_port web_port web_path allow_ping; do
         value=${!key}
         if [ -n "$value" ]; then
@@ -4279,7 +4282,7 @@ get_ip_conf_cmd() {
 
     sh=/initrd-network.sh
     if is_found_ipv4_netconf && is_found_ipv6_netconf && [ "$ipv4_mac" = "$ipv6_mac" ]; then
-        printf '%s %s %s %s %s %s %s %s\n' \
+        printf '%s %s %s %s %s %s %s %s %s %s %s\n' \
             "$(reinstall_shell_quote "$sh")" \
             "$(reinstall_shell_quote "$ipv4_mac")" \
             "$(reinstall_shell_quote "$ipv4_addr")" \
@@ -4287,10 +4290,13 @@ get_ip_conf_cmd() {
             "$(reinstall_shell_quote "$ipv6_addr")" \
             "$(reinstall_shell_quote "$ipv6_gateway")" \
             "$(reinstall_shell_quote "$is_in_china")" \
-            "$(reinstall_shell_quote "$ipv6_extra_addrs")"
+            "$(reinstall_shell_quote "$ipv6_extra_addrs")" \
+            "$(reinstall_shell_quote "$ip_mode")" \
+            "$(reinstall_shell_quote "$dns_mode")" \
+            "$(reinstall_shell_quote "$dns_servers")"
     else
         if is_found_ipv4_netconf; then
-            printf '%s %s %s %s %s %s %s %s\n' \
+            printf '%s %s %s %s %s %s %s %s %s %s %s\n' \
                 "$(reinstall_shell_quote "$sh")" \
                 "$(reinstall_shell_quote "$ipv4_mac")" \
                 "$(reinstall_shell_quote "$ipv4_addr")" \
@@ -4298,10 +4304,13 @@ get_ip_conf_cmd() {
                 "$(reinstall_shell_quote '')" \
                 "$(reinstall_shell_quote '')" \
                 "$(reinstall_shell_quote "$is_in_china")" \
-                "$(reinstall_shell_quote '')"
+                "$(reinstall_shell_quote '')" \
+                "$(reinstall_shell_quote "$ip_mode")" \
+                "$(reinstall_shell_quote "$dns_mode")" \
+                "$(reinstall_shell_quote "$dns_servers")"
         fi
         if is_found_ipv6_netconf; then
-            printf '%s %s %s %s %s %s %s %s\n' \
+            printf '%s %s %s %s %s %s %s %s %s %s %s\n' \
                 "$(reinstall_shell_quote "$sh")" \
                 "$(reinstall_shell_quote "$ipv6_mac")" \
                 "$(reinstall_shell_quote '')" \
@@ -4309,7 +4318,10 @@ get_ip_conf_cmd() {
                 "$(reinstall_shell_quote "$ipv6_addr")" \
                 "$(reinstall_shell_quote "$ipv6_gateway")" \
                 "$(reinstall_shell_quote "$is_in_china")" \
-                "$(reinstall_shell_quote "$ipv6_extra_addrs")"
+                "$(reinstall_shell_quote "$ipv6_extra_addrs")" \
+                "$(reinstall_shell_quote "$ip_mode")" \
+                "$(reinstall_shell_quote "$dns_mode")" \
+                "$(reinstall_shell_quote "$dns_servers")"
         fi
     fi
 }
@@ -4924,6 +4936,9 @@ fi
 
 # 整理参数
 filesystem=ext4
+ip_mode=auto
+dns_mode=auto
+dns_servers=
 long_opts=
 for o in ci installer debug minimal no-cloud-kernel no-auto-drivers allow-ping force-cn help \
     add-driver: \
@@ -4947,6 +4962,9 @@ for o in ci installer debug minimal no-cloud-kernel no-auto-drivers allow-ping f
     target-disk: \
     force-boot-mode: \
     filesystem: \
+    ip-mode: \
+    dns-mode: \
+    dns-servers: \
     force-old-windows-setup:; do
     [ -n "$long_opts" ] && long_opts+=,
     long_opts+=$o
@@ -4972,6 +4990,9 @@ while true; do
         ;;
     --filesystem)
         filesystem=$2
+        shift 2
+        ;;
+    --ip-mode | --dns-mode | --dns-servers)
         shift 2
         ;;
     --)
@@ -5034,6 +5055,10 @@ while true; do
         ;;
     --filesystem)
         filesystem=$2
+        shift 2
+        ;;
+    --ip-mode | --dns-mode | --dns-servers)
+        reinstall_network_set_cli_option "$1" "$2" || error_and_exit "Invalid network option: $1"
         shift 2
         ;;
     --ci)
@@ -5298,6 +5323,19 @@ EOF
         ;;
     esac
 done
+
+if reinstall_network_validate_cli_options; then
+    :
+else
+    network_options_status=$?
+    case "$network_options_status" in
+    1) error_and_exit "Invalid --ip-mode value: $ip_mode (expected auto, dhcp, or static)." ;;
+    2) error_and_exit "Invalid --dns-mode value: $dns_mode (expected auto, dhcp, or static)." ;;
+    3) error_and_exit "--dns-mode=static requires --dns-servers." ;;
+    4) error_and_exit "Invalid --dns-servers value: expected comma-separated IPv4 or IPv6 addresses." ;;
+    5) error_and_exit "--dns-servers can only be used with --dns-mode=static." ;;
+    esac
+fi
 
 # 检查必须的参数
 verify_os_args

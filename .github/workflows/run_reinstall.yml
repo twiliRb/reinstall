@@ -35,9 +35,11 @@ jobs:
             --entrypoint /bin/sh \
             alpine:3.24.2 \
             tests/test_reinstall_alpine_initrd.sh
-      - name: Test command-line, Btrfs layout, and Windows serializers
+      - name: Test command-line, network, Btrfs, and Windows serializers
         run: |
           bash tests/test_reinstall_cmdline.sh
+          sh tests/test_reinstall_network.sh
+          bash tests/test_smoke_output.sh
           bash tests/test_reinstall_btrfs_layout.sh
           sh tests/test_reinstall_btrfs_target_config.sh
           bash tests/test_windows_serialize.sh
@@ -98,7 +100,7 @@ jobs:
             --workdir /workspace \
             --entrypoint /bin/sh \
             "$DISTRO_IMAGE" \
-            tests/test_reinstall_btrfs_target_config.sh
+            -ec 'sh tests/test_reinstall_btrfs_target_config.sh && sh tests/test_reinstall_network.sh'
 
   btrfs-install-dry-run:
     name: Btrfs install dry-run
@@ -175,23 +177,16 @@ jobs:
       - name: Run Linux smoke checks
         if: runner.os == 'Linux'
         run: |
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x almalinux
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x ubuntu
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian --ci
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug netboot.xyz
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
-          sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug reset
+          source tests/smoke-quiet.sh
+          run_smoke_check 'AlmaLinux' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x almalinux
+          run_smoke_check 'Ubuntu' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x ubuntu
+          run_smoke_check 'Debian' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x debian
+          run_smoke_check 'Debian cloud-init with network modes' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
+          run_smoke_check 'netboot.xyz' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug netboot.xyz
+          run_smoke_check 'Debian image' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
+          run_smoke_check 'Windows image' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
+          run_smoke_check 'Reset' sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --debug reset
       - name: Run Windows smoke checks
         if: runner.os == 'Windows'
-        shell: cmd
-        run: |
-          call reinstall.bat --debug --username x --password x almalinux || exit /b 1
-          call reinstall.bat --debug --username x --password x ubuntu || exit /b 1
-          call reinstall.bat --debug --username x --password x debian || exit /b 1
-          call reinstall.bat --debug --username x --password x debian --ci || exit /b 1
-          call reinstall.bat --debug netboot.xyz || exit /b 1
-          call reinstall.bat --debug --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz || exit /b 1
-          call reinstall.bat --debug --username x --password x windows --image-name="Windows Server blah" --iso https://aka.ms/HCIReleaseImage || exit /b 1
-          call reinstall.bat --debug reset || exit /b 1
+        shell: pwsh
+        run: ./tests/run_windows_smoke.ps1

@@ -12,6 +12,23 @@ ipv6_addr=$4
 ipv6_gateway=$5
 is_in_china=$6
 ipv6_extra_addrs=$7
+ip_mode=${8:-auto}
+dns_mode=${9:-auto}
+dns_servers=${10:-}
+
+cmdline_helper=/reinstall-cmdline.sh
+if ! [ -r "$cmdline_helper" ]; then
+    cmdline_helper="$(dirname "$0")/lib/reinstall-cmdline.sh"
+fi
+if ! [ -r "$cmdline_helper" ]; then
+    echo "Missing network policy helper: $cmdline_helper" >&2
+    exit 1
+fi
+. "$cmdline_helper"
+if ! reinstall_network_validate_cli_options; then
+    echo "Invalid network mode or DNS server list." >&2
+    exit 1
+fi
 
 DHCP_TIMEOUT=15
 DNS_FILE_TIMEOUT=5
@@ -34,6 +51,46 @@ else
     ipv6_dns1='2606:4700:4700::1111'
     ipv6_dns2='2001:4860:4860::8888' # 不开放 80
 fi
+ipv4_probe_dns="$ipv4_dns1 $ipv4_dns2"
+ipv6_probe_dns="$ipv6_dns1 $ipv6_dns2"
+
+capture_resolv_dns_servers() {
+    local candidates server servers
+    candidates=$(awk '/^nameserver[[:space:]]+/ {print $2}' /etc/resolv.conf 2>/dev/null | sed 's/%.*//')
+    servers=
+    while IFS= read -r server; do
+        [ -n "$server" ] || continue
+        if reinstall_network_validate_dns_servers "$server"; then
+            if [ -n "$servers" ]; then
+                servers="$servers,$server"
+            else
+                servers=$server
+            fi
+        fi
+    done <<EOF
+$candidates
+EOF
+    printf '%s' "$servers"
+}
+
+capture_rdnss_dns_servers() {
+    local output
+    command -v rdisc6 >/dev/null 2>&1 || return 0
+    output=$(rdisc6 -1 "$ethx" 2>/dev/null) || return 0
+    reinstall_network_extract_rdnss "$output"
+}
+
+write_resolv_dns_servers() {
+    local servers=$1
+    : >/etc/resolv.conf
+    (
+        IFS=,
+        set -f
+        for server in $servers; do
+            printf 'nameserver %s\n' "$server"
+        done
+    ) >>/etc/resolv.conf
+}
 
 # 找到主网卡
 # debian 11 initrd 没有 xargs awk
@@ -252,20 +309,29 @@ test_connect() {
     fi
 }
 
+test_against_dns_servers() {
+    local source_addr=$1 servers server
+    servers=$2
+    for server in $servers; do
+        if test_connect "$source_addr" "$server"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 test_internet() {
     for i in $(seq 5); do
         echo "Testing Internet Connection. Test $i... "
         if is_need_test_ipv4 &&
             current_ipv4_addr="$(get_first_ipv4_addr | remove_netmask)" &&
-            { test_connect "$current_ipv4_addr" "$ipv4_dns1" ||
-                test_connect "$current_ipv4_addr" "$ipv4_dns2"; } >/dev/null 2>&1; then
+            test_against_dns_servers "$current_ipv4_addr" "$ipv4_probe_dns" >/dev/null 2>&1; then
             echo "IPv4 has internet."
             ipv4_has_internet=true
         fi
         if is_need_test_ipv6 &&
             current_ipv6_addr="$(get_first_ipv6_addr | remove_netmask)" &&
-            { test_connect "$current_ipv6_addr" "$ipv6_dns1" ||
-                test_connect "$current_ipv6_addr" "$ipv6_dns2"; } >/dev/null 2>&1; then
+            test_against_dns_servers "$current_ipv6_addr" "$ipv6_probe_dns" >/dev/null 2>&1; then
             echo "IPv6 has internet."
             ipv6_has_internet=true
         fi
@@ -409,6 +475,30 @@ for i in $(seq 5 -1 0); do
     sleep 1
 done
 
+# Save DHCP/RA nameservers before the static-address fallback can flush them.
+dhcp_dns_servers=
+if [ "$dns_mode" = dhcp ]; then
+    resolv_dns_servers=$(capture_resolv_dns_servers)
+    rdnss_dns_servers=$(capture_rdnss_dns_servers)
+    dhcp_dns_servers=$(reinstall_network_parse_dns_candidates \
+        "$resolv_dns_servers,$rdnss_dns_servers") || dhcp_dns_servers=
+fi
+case "$dns_mode" in
+static) runtime_dns_servers=$dns_servers ;;
+dhcp)
+    runtime_dns_servers=$dhcp_dns_servers
+    ;;
+auto) runtime_dns_servers= ;;
+esac
+
+if [ "$dns_mode" != auto ]; then
+    [ -z "$runtime_dns_servers" ] || write_resolv_dns_servers "$runtime_dns_servers"
+    ipv4_probe_dns=$(reinstall_network_filter_dns_servers "$runtime_dns_servers" 4)
+    ipv6_probe_dns=$(reinstall_network_filter_dns_servers "$runtime_dns_servers" 6)
+    [ -n "$ipv4_probe_dns" ] || ipv4_probe_dns="$ipv4_dns1 $ipv4_dns2"
+    [ -n "$ipv6_probe_dns" ] || ipv6_probe_dns="$ipv6_dns1 $ipv6_dns2"
+fi
+
 # 记录是否有动态地址
 # 由于还没设置静态ip，所以有条目表示有动态地址
 is_have_ipv4_addr && dhcpv4=true || dhcpv4=false
@@ -419,23 +509,40 @@ is_have_ipv6_gateway && ra_has_gateway=true || ra_has_gateway=false
 # 只比较 IP，不比较掩码/网关，因为
 # 1. 假设掩码/网关导致无法上网，后面也会检测到并改成静态
 # 2. openSUSE wicked dhcpv6 是 64 位掩码，aws lightsail 模板上的也是，而其它 dhcpv6 软件都是 128 位掩码
-if $dhcpv4 && [ -n "$ipv4_addr" ] && [ -n "$ipv4_gateway" ] &&
-    ! [ "$(echo "$ipv4_addr" | cut -d/ -f1)" = "$(get_first_ipv4_addr | cut -d/ -f1)" ]; then
-    echo "IPv4 address obtained from DHCP is different from old system."
+if [ "$ip_mode" = static ]; then
     should_disable_dhcpv4=true
     flush_ipv4_config
-fi
-if $dhcpv6_or_slaac && [ -n "$ipv6_addr" ] && [ -n "$ipv6_gateway" ] &&
-    ! [ "$(echo "$ipv6_addr" | cut -d/ -f1)" = "$(get_first_ipv6_addr | cut -d/ -f1)" ]; then
-    echo "IPv6 address obtained from SLAAC/DHCPv6 is different from old system."
     should_disable_accept_ra=true
     should_disable_autoconf=true
     flush_ipv6_config
-fi
+    add_missing_ipv4_config
+    add_missing_ipv6_config
+    [ -z "$runtime_dns_servers" ] || write_resolv_dns_servers "$runtime_dns_servers"
+elif [ "$ip_mode" = dhcp ]; then
+    # Explicit DHCP mode asks the installed system to reacquire addresses,
+    # even when the currently installed system used static configuration.
+    should_disable_dhcpv4=false
+    should_disable_accept_ra=false
+    should_disable_autoconf=false
+elif [ "$ip_mode" = auto ]; then
+    if $dhcpv4 && [ -n "$ipv4_addr" ] && [ -n "$ipv4_gateway" ] &&
+        ! [ "$(echo "$ipv4_addr" | cut -d/ -f1)" = "$(get_first_ipv4_addr | cut -d/ -f1)" ]; then
+        echo "IPv4 address obtained from DHCP is different from old system."
+        should_disable_dhcpv4=true
+        flush_ipv4_config
+    fi
+    if $dhcpv6_or_slaac && [ -n "$ipv6_addr" ] && [ -n "$ipv6_gateway" ] &&
+        ! [ "$(echo "$ipv6_addr" | cut -d/ -f1)" = "$(get_first_ipv6_addr | cut -d/ -f1)" ]; then
+        echo "IPv6 address obtained from SLAAC/DHCPv6 is different from old system."
+        should_disable_accept_ra=true
+        should_disable_autoconf=true
+        flush_ipv6_config
+    fi
 
-# 设置静态地址，或者设置 debian 9 udhcpc 无法设置的网关
-add_missing_ipv4_config
-add_missing_ipv6_config
+    # 设置静态地址，或者设置 debian 9 udhcpc 无法设置的网关
+    add_missing_ipv4_config
+    add_missing_ipv6_config
+fi
 
 # 检查 ipv4/ipv6 是否连接联网
 ipv4_has_internet=false
@@ -445,26 +552,28 @@ test_internet
 # 如果无法上网，并且自动获取的 掩码/网关 不是重装前的，则改成静态
 # ip_addr 包括 IP/掩码，所以可以用来判断掩码是否不同
 # IP 不同的情况在前面已经改成静态了
-if ! $ipv4_has_internet &&
+if [ "$ip_mode" = auto ]; then
+    if ! $ipv4_has_internet &&
     $dhcpv4 && [ -n "$ipv4_addr" ] && [ -n "$ipv4_gateway" ] &&
     ! { [ "$ipv4_addr" = "$(get_first_ipv4_addr)" ] && [ "$ipv4_gateway" = "$(get_first_ipv4_gateway)" ]; }; then
-    echo "IPv4 netmask/gateway obtained from DHCP is different from old system."
-    should_disable_dhcpv4=true
-    flush_ipv4_config
-    add_missing_ipv4_config
-    test_internet
-fi
-# 有可能是静态 IPv6 但能从 RA 获取到网关，因此加上 || $ra_has_gateway
-if ! $ipv6_has_internet &&
+        echo "IPv4 netmask/gateway obtained from DHCP is different from old system."
+        should_disable_dhcpv4=true
+        flush_ipv4_config
+        add_missing_ipv4_config
+        test_internet
+    fi
+    # 有可能是静态 IPv6 但能从 RA 获取到网关，因此加上 || $ra_has_gateway
+    if ! $ipv6_has_internet &&
     { $dhcpv6_or_slaac || $ra_has_gateway; } &&
     [ -n "$ipv6_addr" ] && [ -n "$ipv6_gateway" ] &&
     ! { [ "$ipv6_addr" = "$(get_first_ipv6_addr)" ] && [ "$ipv6_gateway" = "$(get_first_ipv6_gateway)" ]; }; then
-    echo "IPv6 netmask/gateway obtained from SLAAC/DHCPv6 is different from old system."
-    should_disable_accept_ra=true
-    should_disable_autoconf=true
-    flush_ipv6_config
-    add_missing_ipv6_config
-    test_internet
+        echo "IPv6 netmask/gateway obtained from SLAAC/DHCPv6 is different from old system."
+        should_disable_accept_ra=true
+        should_disable_autoconf=true
+        flush_ipv6_config
+        add_missing_ipv6_config
+        test_internet
+    fi
 fi
 
 # 要删除不联网协议的ip，因为
@@ -476,7 +585,7 @@ fi
 # 假设 ipv4 ipv6 在不同网卡，ipv4 能上网但 ipv6 不能上网，这时也要删除 ipv6
 # 不能用 ipv4_has_internet && ! ipv6_has_internet 判断，因为它判断的是同一个网卡
 if ! $ipv4_has_internet; then
-    if $dhcpv4; then
+    if [ "$ip_mode" = auto ] && $dhcpv4; then
         should_disable_dhcpv4=true
     fi
     flush_ipv4_config
@@ -484,11 +593,20 @@ fi
 if ! $ipv6_has_internet; then
     # 防止删除 IPv6 后再次通过 SLAAC 获得
     # 不用判断 || $ra_has_gateway ，因为没有 IPv6 地址但有 IPv6 网关时，不会出现下载问题
-    if $dhcpv6_or_slaac; then
+    if [ "$ip_mode" = auto ] && $dhcpv6_or_slaac; then
         should_disable_accept_ra=true
         should_disable_autoconf=true
     fi
     flush_ipv6_config
+fi
+
+if [ "$dns_mode" != auto ]; then
+    [ -z "$runtime_dns_servers" ] || write_resolv_dns_servers "$runtime_dns_servers"
+fi
+
+if [ "$ip_mode" != auto ] && ! $ipv4_has_internet && ! $ipv6_has_internet; then
+    echo "Requested IP mode ($ip_mode) did not produce a working network." >&2
+    exit 1
 fi
 
 # 如果联网了，但没获取到默认 DNS，则添加我们的 DNS
@@ -497,13 +615,16 @@ fi
 # 无法上网的网卡通过 flush_ipv4_config 删除了不能上网的 IP 和 dns
 # （原计划是删除无法上网的网卡 dhcp4 获取的 dns，但实际上无法区分）
 # 因此这里直接添加 dns，不判断是否联网
-if ! is_have_ipv4_dns; then
-    echo "nameserver $ipv4_dns1" >>/etc/resolv.conf
-    echo "nameserver $ipv4_dns2" >>/etc/resolv.conf
-fi
-if ! is_have_ipv6_dns; then
-    echo "nameserver $ipv6_dns1" >>/etc/resolv.conf
-    echo "nameserver $ipv6_dns2" >>/etc/resolv.conf
+if [ "$dns_mode" = auto ] ||
+    { [ "$dns_mode" = dhcp ] && [ -z "$dhcp_dns_servers" ]; }; then
+    if ! is_have_ipv4_dns; then
+        echo "nameserver $ipv4_dns1" >>/etc/resolv.conf
+        echo "nameserver $ipv4_dns2" >>/etc/resolv.conf
+    fi
+    if ! is_have_ipv6_dns; then
+        echo "nameserver $ipv6_dns1" >>/etc/resolv.conf
+        echo "nameserver $ipv6_dns2" >>/etc/resolv.conf
+    fi
 fi
 
 # 传参给 trans.start
@@ -515,6 +636,10 @@ $should_disable_dhcpv4 && echo 1 >"$netconf/should_disable_dhcpv4" || echo 0 >"$
 $should_disable_accept_ra && echo 1 >"$netconf/should_disable_accept_ra" || echo 0 >"$netconf/should_disable_accept_ra"
 $should_disable_autoconf && echo 1 >"$netconf/should_disable_autoconf" || echo 0 >"$netconf/should_disable_autoconf"
 $is_in_china && echo 1 >"$netconf/is_in_china" || echo 0 >"$netconf/is_in_china"
+echo "$ip_mode" >"$netconf/ip_mode"
+echo "$dns_mode" >"$netconf/dns_mode"
+echo "$dns_servers" >"$netconf/dns_servers"
+echo "$dhcp_dns_servers" >"$netconf/dhcp_dns_servers"
 echo "$ethx" >"$netconf/ethx"
 echo "$mac_addr" >"$netconf/mac_addr"
 echo "$ipv4_addr" >"$netconf/ipv4_addr"

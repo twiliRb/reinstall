@@ -176,6 +176,9 @@ bash reinstall.sh anolis      7|8|23
 - `--ssh-key KEY` Set up SSH login public key, [formatted as follows](#--ssh-key). When using public key, password is empty.
 - `--ssh-port PORT` Change the SSH port
 - `--web-port PORT` Change the Web port (for log observation during installation only)
+- `--ip-mode auto|dhcp|static` Select the target IPv4 mode. `auto` keeps the existing automatic choice; `static` reuses the collected address and gateway.
+- `--dns-mode auto|dhcp|static` Select the target DNS mode. `auto` keeps existing behavior; with a static IP and `dhcp`, DNS servers learned during installation are saved.
+- `--dns-servers IP[,IP...]` Set static DNS servers using IPv4 and/or IPv6 addresses; requires `--dns-mode static`.
 - `--frpc-config PATH` Add frpc for intranet tunneling. Parameter can be local filepath or HTTP URL of the configuration file.
 - `--no-cloud-kernel` Avoid using cloud kernel to prevent black or glitch screens on certain machines; applicable to Debian, Ubuntu, Alpine and openSUSE.
 - `--hold 1` Reboot only into install environment, without running installer, only for SSH connect to test network connection.
@@ -248,6 +251,9 @@ bash reinstall.sh dd --img "https://example.com/xxx.xz"
 - `--ssh-key KEY` Set up SSH login public key (for log observation during installation), [formatted as follows](#--ssh-key). When using public key, password is empty.
 - `--ssh-port PORT` Change SSH port (for log observation during installation)
 - `--rdp-port PORT` Change RDP port (DD Windows only)
+- `--ip-mode auto|dhcp|static` Select the DD Windows target IPv4 mode; defaults to `auto`.
+- `--dns-mode auto|dhcp|static` Select the DD Windows target DNS mode; DNS learned during installation is saved for a static IP.
+- `--dns-servers IP[,IP...]` Set static DNS for DD Windows; requires `--dns-mode static`.
 - `--web-port PORT` Change Web port (for log observation during installation)
 - `--allow-ping` Configure Windows Firewall to Allow Ping Responses (DD Windows only)
 - `--frpc-config PATH` Add frpc for intranet tunneling (DD Windows only). Parameter can be local filepath or HTTP URL of the configuration file.
@@ -566,6 +572,9 @@ bash reinstall.sh windows \
 - `--rdp-port PORT` Change RDP port
 - `--ssh-port PORT` Change SSH port (for log observation during installation only)
 - `--web-port PORT` Change Web port (for log observation during installation only)
+- `--ip-mode auto|dhcp|static` Select the target Windows IPv4 mode; defaults to `auto`.
+- `--dns-mode auto|dhcp|static` Select the target Windows DNS mode; DNS learned during installation is saved for a static IP.
+- `--dns-servers IP[,IP...]` Set static DNS for Windows; requires `--dns-mode static`.
 - `--allow-ping` Configure Windows Firewall to Allow Ping Responses
 - `--add-driver INF_OR_DIR` Add additional driver, specifying .inf path, or the folder contains .inf file.
   - The driver must be downloaded to current system first.

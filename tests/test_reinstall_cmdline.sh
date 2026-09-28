@@ -90,7 +90,7 @@ extra_fields=(
     addrs allow_ping cloud_image deb_mirror elts force_boot_mode force_cn
     force_old_windows_setup hold kernel link_grub_dir localtest main_disk
     mirrorlist no_auto_drivers no_cloud_kernel rdp_port source_id ssh_port
-    username web_path web_port
+    username web_path web_port ip_mode dns_mode dns_servers
 )
 finalos_payload='root=/dev/vda'
 for field in "${finalos_fields[@]}"; do

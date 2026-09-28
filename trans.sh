@@ -574,9 +574,16 @@ get_all_disks() {
 
 extract_env_from_cmdline() {
     filesystem=ext4
+    ip_mode=auto
+    dns_mode=auto
+    dns_servers=
     # 提取 finalos/extra 到变量
     reinstall_cmdline_load_file /proc/cmdline all ||
         error_and_exit "Invalid command-line configuration."
+
+    if ! reinstall_network_validate_cli_options; then
+        error_and_exit "Invalid network mode or DNS server list in command-line configuration."
+    fi
 
     if reinstall_validate_filesystem "$filesystem" "$distro"; then
         :
@@ -853,7 +860,8 @@ get_netconf_to() {
     slaac | dhcpv6 | rdnss | other) get_ra_to ra ;;
     dhcpv4 | ipv4_addr | ipv4_gateway | ipv6_addr | ipv6_gateway | dhcpv6_or_slaac | \
         ipv4_has_internet | ipv6_has_internet | should_disable_dhcpv4 | should_disable_accept_ra | \
-        should_disable_autoconf | mac_addr | ipv6_extra_addrs) ;;
+        should_disable_autoconf | mac_addr | ipv6_extra_addrs | ip_mode | dns_mode | \
+        dns_servers | dhcp_dns_servers) ;;
     *) return 2 ;;
     esac
 
@@ -862,7 +870,7 @@ get_netconf_to() {
     case "$1" in
     slaac) echo "$ra" | grep 'Autonomous address conf' | grep -q Yes && res=1 || res=0 ;;
     dhcpv6) echo "$ra" | grep 'Stateful address conf' | grep -q Yes && res=1 || res=0 ;;
-    rdnss) res=$(echo "$ra" | grep 'Recursive DNS server' | cut -d: -f2-) ;;
+    rdnss) res=$(reinstall_network_extract_rdnss "$ra") ;;
     other) echo "$ra" | grep 'Stateful other conf' | grep -q Yes && res=1 || res=0 ;;
     *) res=$(cat /dev/netconf/$ethx/$1) ;;
     esac
@@ -885,6 +893,10 @@ get_netconf_to() {
     should_disable_autoconf) should_disable_autoconf=$res ;;
     mac_addr) mac_addr=$res ;;
     ipv6_extra_addrs) ipv6_extra_addrs=$res ;;
+    ip_mode) ip_mode=$res ;;
+    dns_mode) dns_mode=$res ;;
+    dns_servers) dns_servers=$res ;;
+    dhcp_dns_servers) dhcp_dns_servers=$res ;;
     esac
 }
 
@@ -899,17 +911,23 @@ is_in_china() {
 # 有 dhcpv4 不等于有网关，例如 vultr 纯 ipv6
 # 没有 dhcpv4 不等于是静态ip，可能是没有 ip
 is_dhcpv4() {
-    if ! is_ipv4_has_internet || should_disable_dhcpv4; then
+    if ! is_ipv4_has_internet; then
         return 1
     fi
 
     get_netconf_to dhcpv4
+    get_netconf_to should_disable_dhcpv4
     # shellcheck disable=SC2154
-    [ "$dhcpv4" = 1 ]
+    observed_dhcp=false
+    disabled_dhcp=false
+    [ "$dhcpv4" = 1 ] && observed_dhcp=true
+    [ "$should_disable_dhcpv4" = 1 ] && disabled_dhcp=true
+    reinstall_network_use_dhcp "${ip_mode:-auto}" \
+        "$observed_dhcp" "$disabled_dhcp" true
 }
 
 is_staticv4() {
-    if ! is_ipv4_has_internet; then
+    if ! is_ipv4_has_internet || [ "${ip_mode:-auto}" = dhcp ]; then
         return 1
     fi
 
@@ -1117,9 +1135,10 @@ is_need_manual_set_dnsv6() {
         { ! is_have_rdnss || { is_have_rdnss && is_windows && ! is_windows_support_rdnss; }; }
 }
 
-get_current_dns() {
-    mark=$(
-        case "$1" in
+get_resolv_conf_dns() {
+    local _family=$1 _mark
+    _mark=$(
+        case "$_family" in
         4) echo . ;;
         6) echo : ;;
         esac
@@ -1127,9 +1146,40 @@ get_current_dns() {
     # debian 11 initrd 没有 xargs awk
     # debian 12 initrd 没有 xargs
     if false; then
-        grep '^nameserver' /etc/resolv.conf | awk '{print $2}' | grep -F "$mark" | cut -d '%' -f1
+        grep '^nameserver' /etc/resolv.conf | awk '{print $2}' | grep -F "$_mark" | cut -d '%' -f1
     else
-        grep '^nameserver' /etc/resolv.conf | cut -d' ' -f2 | grep -F "$mark" | cut -d '%' -f1
+        grep '^nameserver' /etc/resolv.conf | cut -d' ' -f2 | grep -F "$_mark" | cut -d '%' -f1
+    fi
+}
+
+get_current_dns() {
+    local _mode=${dns_mode:-auto} _family=$1 _target_static=false
+    local _explicit=${dns_servers:-} _acquired= _target_servers
+
+    if [ "$_mode" = auto ]; then
+        get_resolv_conf_dns "$_family"
+        return
+    fi
+
+    if is_staticv4 || is_staticv6; then
+        _target_static=true
+    fi
+    if [ "$_mode" = dhcp ] && [ "$_target_static" = true ]; then
+        get_netconf_to dhcp_dns_servers
+        _acquired=$dhcp_dns_servers
+        if [ -z "$_acquired" ] && is_have_rdnss; then
+            get_netconf_to rdnss
+            _acquired=$(reinstall_network_parse_dns_candidates "$rdnss")
+        fi
+    fi
+    _target_servers=$(reinstall_network_target_dns_servers \
+        "$_mode" "$_target_static" "$_explicit" "$_acquired" '') || return 1
+    [ -z "$_target_servers" ] || reinstall_network_validate_dns_servers "$_target_servers" || return 1
+
+    if [ -n "$_family" ]; then
+        reinstall_network_filter_dns_servers "$_target_servers" "$_family"
+    else
+        printf '%s\n' "$_target_servers" | tr ',' '\n'
     fi
 }
 
@@ -1378,7 +1428,7 @@ iface $ethx inet static
     gateway $ipv4_gateway
 EOF
             # dns
-            if list=$(get_current_dns 4); then
+            if [ "${dns_mode:-auto}" = auto ] && list=$(get_current_dns 4); then
                 for dns in $list; do
                     cat <<EOF >>$conf_file
     dns-nameservers $dns
@@ -1440,6 +1490,24 @@ EOF
                 )
             fi
         fi
+        if [ "${dns_mode:-auto}" != auto ]; then
+            target_has_static_ip=false
+            if is_staticv4 || is_staticv6; then
+                target_has_static_ip=true
+            fi
+            if reinstall_network_should_persist_dns "$dns_mode" "$target_has_static_ip"; then
+                target_dns_list=$(get_current_dns) ||
+                    error_and_exit "Failed to resolve the configured target DNS servers."
+                if ! reinstall_network_require_target_dns \
+                    "$dns_mode" "$target_has_static_ip" "$target_dns_list"; then
+                    error_and_exit "No DNS servers were acquired from DHCP/RA for the static target."
+                fi
+                if [ -n "$target_dns_list" ]; then
+                    target_dns_csv=$(printf '%s\n' "$target_dns_list" | tr '\n' ',' | sed 's/,$//')
+                    reinstall_network_render_dns_config ifupdown "$target_dns_csv" >>"$conf_file"
+                fi
+            fi
+        fi
         # accept_ra/autoconf 属于 iface 选项
         # 如果当前网卡没有生成 IPv6 iface stanza，
         # 先补一个 manual stanza，避免 ifupdown 报 misplaced option
@@ -1450,7 +1518,7 @@ EOF
         fi
         # dns
         # 有 ipv6 但需设置 dns 的情况
-        if is_need_manual_set_dnsv6; then
+        if [ "${dns_mode:-auto}" = auto ] && is_need_manual_set_dnsv6; then
             for dns in $(get_current_dns 6); do
                 cat <<EOF >>$conf_file
     dns-nameserver $dns
@@ -1587,21 +1655,43 @@ EOF
         fi
     done
 
-    # 全局 dns
-    need_set_dns=false
-    for ethx in $(get_eths); do
-        if is_staticv4 || is_staticv6 || is_need_manual_set_dnsv6; then
-            need_set_dns=true
-            break
+    # 全局 DNS。非 auto 模式走与其他目标配置共用的 DNS 策略。
+    if [ "${dns_mode:-auto}" != auto ]; then
+        target_has_static_ip=false
+        for ethx in $(get_eths); do
+            if is_staticv4 || is_staticv6; then
+                target_has_static_ip=true
+                break
+            fi
+        done
+        if reinstall_network_should_persist_dns "$dns_mode" "$target_has_static_ip"; then
+            target_dns_list=$(get_current_dns) ||
+                error_and_exit "Failed to resolve the configured target DNS servers."
+            if ! reinstall_network_require_target_dns \
+                "$dns_mode" "$target_has_static_ip" "$target_dns_list"; then
+                error_and_exit "No DNS servers were acquired from DHCP/RA for the static target."
+            fi
+            if [ -n "$target_dns_list" ]; then
+                target_dns_csv=$(printf '%s\n' "$target_dns_list" | tr '\n' ',' | sed 's/,$//')
+                reinstall_network_render_dns_config nixos "$target_dns_csv" >>"$conf_file"
+            fi
         fi
-    done
+    else
+        need_set_dns=false
+        for ethx in $(get_eths); do
+            if is_staticv4 || is_staticv6 || is_need_manual_set_dnsv6; then
+                need_set_dns=true
+                break
+            fi
+        done
 
-    if $need_set_dns; then
-        cat <<EOF >>$conf_file
+        if $need_set_dns; then
+            cat <<EOF >>$conf_file
   nameservers = [
 $(get_current_dns | quote_line | add_space 4)
   ];
 EOF
+        fi
     fi
 
     # 尾部
@@ -3556,9 +3646,11 @@ create_cloud_init_network_config() {
             # 有的版本会只从第一种配置中读取 dns，有的从第二种读取
             # 因此写两种配置
             # https://github.com/canonical/cloud-init/commit/1b8030e0c7fd6fbff7e38ad1e3e6266ae50c83a5
-            for cur in $(get_current_dns 4); do
-                yq -i ".network.config[$config_id].subnets[$subnet_id].dns_nameservers += [\"$cur\"]" $ci_file
-            done
+            if [ "${dns_mode:-auto}" = auto ]; then
+                for cur in $(get_current_dns 4); do
+                    yq -i ".network.config[$config_id].subnets[$subnet_id].dns_nameservers += [\"$cur\"]" $ci_file
+                done
+            fi
             subnet_id=$((subnet_id + 1))
         fi
 
@@ -3608,7 +3700,7 @@ create_cloud_init_network_config() {
         fi
 
         # 有 ipv6 但需设置 dns 的情况
-        if is_need_manual_set_dnsv6; then
+        if [ "${dns_mode:-auto}" = auto ] && is_need_manual_set_dnsv6; then
             need_set_dns6=true
             for cur in $(get_current_dns 6); do
                 yq -i ".network.config[$config_id].subnets[$subnet_id].dns_nameservers += [\"$cur\"]" $ci_file
@@ -3617,6 +3709,28 @@ create_cloud_init_network_config() {
 
         config_id=$((config_id + 1))
     done
+
+    # For explicit policies, emit one cloud-init nameserver record. This also
+    # covers static DNS on a DHCP target and DHCP DNS captured for a static one.
+    if [ "${dns_mode:-auto}" != auto ]; then
+        target_has_static_ip=false
+        for ethx in $(get_eths); do
+            if is_staticv4 || is_staticv6; then
+                target_has_static_ip=true
+                break
+            fi
+        done
+        if reinstall_network_should_persist_dns "$dns_mode" "$target_has_static_ip"; then
+            target_dns_list=$(get_current_dns) ||
+                error_and_exit "Failed to resolve the configured target DNS servers."
+            if ! reinstall_network_require_target_dns \
+                "$dns_mode" "$target_has_static_ip" "$target_dns_list"; then
+                error_and_exit "No DNS servers were acquired from DHCP/RA for the static target."
+            fi
+            [ -n "$(get_current_dns 4)" ] && need_set_dns4=true
+            [ -n "$(get_current_dns 6)" ] && need_set_dns6=true
+        fi
+    fi
 
     if $need_set_dns4 || $need_set_dns6; then
         yq -i ".network.config[$config_id].type=\"nameserver\"" $ci_file
@@ -6560,7 +6674,23 @@ create_win_set_netconf_script() {
     target=$1
     info "Create win netconf script"
 
-    if is_staticv4 || is_staticv6 || is_need_manual_set_dnsv6; then
+    target_has_static_ip=false
+    if is_staticv4 || is_staticv6; then
+        target_has_static_ip=true
+    fi
+    persist_policy_dns=false
+    if [ "${dns_mode:-auto}" != auto ] &&
+        reinstall_network_should_persist_dns "$dns_mode" "$target_has_static_ip"; then
+        persist_policy_dns=true
+        target_dns_list=$(get_current_dns) ||
+            error_and_exit "Failed to resolve the configured target DNS servers."
+        if ! reinstall_network_require_target_dns \
+            "$dns_mode" "$target_has_static_ip" "$target_dns_list"; then
+            error_and_exit "No DNS servers were acquired from DHCP/RA for the static target."
+        fi
+    fi
+
+    if is_staticv4 || is_staticv6 || is_need_manual_set_dnsv6 || $persist_policy_dns; then
         get_netconf_to mac_addr
         echo "set mac_addr=$mac_addr" >$target
 
@@ -6571,7 +6701,7 @@ create_win_set_netconf_script() {
             cat <<EOF >>$target
 set ipv4_addr=$ipv4_addr
 set ipv4_gateway=$ipv4_gateway
-$(get_dns_list_for_win 4)
+$(if [ "${dns_mode:-auto}" = auto ]; then get_dns_list_for_win 4; fi)
 EOF
         fi
 
@@ -6586,10 +6716,15 @@ EOF
         fi
 
         # 有 ipv6 但需设置 dns 的情况
-        if is_need_manual_set_dnsv6; then
+        if [ "${dns_mode:-auto}" = auto ] && is_need_manual_set_dnsv6; then
             cat <<EOF >>$target
 $(get_dns_list_for_win 6)
 EOF
+        fi
+
+        if $persist_policy_dns; then
+            get_dns_list_for_win 4 >>"$target"
+            get_dns_list_for_win 6 >>"$target"
         fi
 
         cat -n $target

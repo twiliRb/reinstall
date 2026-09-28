@@ -16,6 +16,213 @@ reinstall_shell_quote() {
     printf "'"
 }
 
+# Apply the network-related long CLI options. Values remain data and are
+# validated as a whole after getopt has parsed every option.
+reinstall_network_set_cli_option() {
+    case "$1" in
+    --ip-mode) ip_mode=$2 ;;
+    --dns-mode) dns_mode=$2 ;;
+    --dns-servers)
+        if [ -n "${dns_servers:-}" ]; then
+            dns_servers="$dns_servers,$2"
+        else
+            dns_servers=$2
+        fi
+        ;;
+    *) return 2 ;;
+    esac
+}
+
+# Validate comma-separated IPv4/IPv6 DNS literals. This intentionally rejects
+# hostnames, zones, whitespace, and shell/config syntax so the values can be
+# used in Linux and Windows target configuration without interpreting them.
+reinstall_network_validate_dns_servers() {
+    case "$1" in
+    '' | ,* | *, | *,,*) return 1 ;;
+    esac
+
+    printf '%s\n' "$1" | awk '
+        function ipv4(value, octets, count, i, number) {
+            count = split(value, octets, ".")
+            if (count != 4) return 0
+            for (i = 1; i <= count; i++) {
+                if (octets[i] !~ /^[0-9]+$/ || length(octets[i]) > 3) return 0
+                number = octets[i] + 0
+                if (number > 255) return 0
+            }
+            return 1
+        }
+        function valid_groups(value, groups, count, i) {
+            count = split(value, groups, ":")
+            for (i = 1; i <= count; i++) {
+                if (groups[i] !~ /^[0-9A-Fa-f]+$/ || length(groups[i]) > 4) return 0
+            }
+            return count
+        }
+        function ipv6(value, groups, halves, count, compressed, group_count, i, part_count) {
+            if (value !~ /:/ || value !~ /^[0-9A-Fa-f:]+$/ || value ~ /:::/) return 0
+            compressed = (value ~ /::/)
+            if (compressed && value ~ /::.*::/) return 0
+            if (substr(value, 1, 1) == ":" && substr(value, 1, 2) != "::") return 0
+            if (substr(value, length(value), 1) == ":" && substr(value, length(value) - 1, 2) != "::") return 0
+            if (compressed) {
+                split(value, halves, "::")
+                group_count = 0
+                for (i = 1; i <= 2; i++) {
+                    if (halves[i] == "") continue
+                    part_count = valid_groups(halves[i], groups)
+                    if (!part_count) return 0
+                    group_count += part_count
+                }
+                return group_count < 8
+            }
+            return valid_groups(value, groups) == 8
+        }
+        {
+            count = split($0, servers, ",")
+            if (count < 1) exit 1
+            for (i = 1; i <= count; i++) {
+                if (!ipv4(servers[i]) && !ipv6(servers[i])) exit 1
+            }
+        }
+    '
+}
+
+reinstall_network_validate_cli_options() {
+    case "${ip_mode:-auto}" in auto | dhcp | static) ;; *) return 1 ;; esac
+    case "${dns_mode:-auto}" in auto | dhcp | static) ;; *) return 2 ;; esac
+
+    if [ "${dns_mode:-auto}" = static ]; then
+        [ -n "${dns_servers:-}" ] || return 3
+        reinstall_network_validate_dns_servers "$dns_servers" || return 4
+    elif [ -n "${dns_servers:-}" ]; then
+        return 5
+    fi
+}
+
+# Resolve the nameservers to write to a target. `auto` keeps the old behavior,
+# DHCP remains managed by the target for dynamic IPs, and static IPs pin the
+# servers observed during installer DHCP/RA when DNS mode is `dhcp`.
+reinstall_network_target_dns_servers() {
+    case "$1" in
+    auto) printf '%s' "$5" ;;
+    static) printf '%s' "$3" ;;
+    dhcp)
+        if [ "$2" = true ]; then
+            printf '%s' "$4"
+        fi
+        ;;
+    *) return 2 ;;
+    esac
+}
+
+reinstall_network_should_persist_dns() {
+    case "$1" in
+    auto) return 1 ;;
+    static) return 0 ;;
+    dhcp) [ "$2" = true ] ;;
+    *) return 2 ;;
+    esac
+}
+
+reinstall_network_require_target_dns() {
+    if reinstall_network_should_persist_dns "$1" "$2"; then
+        [ -n "$3" ]
+    else
+        return 0
+    fi
+}
+
+# Decide whether the target should obtain IPv4 through DHCP. `static` always
+# disables target DHCP; `dhcp` forces it when the installer has working IPv4;
+# `auto` preserves the detected mode unless DHCP was explicitly disabled.
+reinstall_network_use_dhcp() {
+    case "$1" in
+    auto) [ "$2" = true ] && [ "$3" = false ] && [ "$4" = true ] ;;
+    dhcp) [ "$4" = true ] ;;
+    static) return 1 ;;
+    *) return 2 ;;
+    esac
+}
+
+reinstall_network_filter_dns_servers() {
+    case "$2" in 4 | 6) ;; *) return 2 ;; esac
+    (
+        IFS=,
+        set -f
+        for _reinstall_dns_server in $1; do
+            case "$2:$_reinstall_dns_server" in
+            4:*.*) printf '%s\n' "$_reinstall_dns_server" ;;
+            6:*:*) printf '%s\n' "$_reinstall_dns_server" ;;
+            esac
+        done
+    )
+}
+
+# Convert rdisc6 output fragments (possibly separated by whitespace or
+# commas) into a validated comma-separated DNS list. IPv6 colons are retained.
+reinstall_network_parse_dns_candidates() (
+    local _reinstall_candidates=$1 _reinstall_invalid _reinstall_server
+    local _reinstall_result= _reinstall_separator=
+
+    _reinstall_invalid=$(printf '%s' "$_reinstall_candidates" |
+        tr -d '0123456789abcdefABCDEF:.,[:space:]')
+    [ -z "$_reinstall_invalid" ] || exit 1
+
+    _reinstall_candidates=$(printf '%s' "$_reinstall_candidates" | tr ',\t\n' '   ')
+    IFS=' '
+    set -f
+    for _reinstall_server in $_reinstall_candidates; do
+        reinstall_network_validate_dns_servers "$_reinstall_server" || exit 1
+        _reinstall_result="$_reinstall_result$_reinstall_separator$_reinstall_server"
+        _reinstall_separator=,
+    done
+    printf '%s' "$_reinstall_result"
+)
+
+reinstall_network_extract_rdnss() {
+    local _reinstall_output
+    _reinstall_output=$(printf '%s\n' "$1" | awk '
+        /Recursive DNS server/ {
+            sub(/^.*Recursive DNS server[[:space:]]*:?[[:space:]]*/, "")
+            for (i = 1; i <= NF; i++) {
+                gsub(/[^[:xdigit:]:]/, "", $i)
+                if (index($i, ":") > 0) print $i
+            }
+        }
+    ')
+    reinstall_network_parse_dns_candidates "$_reinstall_output"
+}
+
+reinstall_network_render_dns_config() {
+    local _reinstall_format=$1 _reinstall_servers=$2
+    reinstall_network_validate_dns_servers "$_reinstall_servers" || return 1
+
+    case "$_reinstall_format" in
+    ifupdown)
+        (
+            IFS=,
+            set -f
+            for server in $_reinstall_servers; do
+                printf '    dns-nameservers %s\n' "$server"
+            done
+        )
+        ;;
+    nixos)
+        printf '  nameservers = [\n'
+        (
+            IFS=,
+            set -f
+            for server in $_reinstall_servers; do
+                printf '    "%s"\n' "$server"
+            done
+        )
+        printf '  ];\n'
+        ;;
+    *) return 2 ;;
+    esac
+}
+
 # Select a CLI target after bootloader discovery, which may have cached the
 # running system's disk ID. The next find_main_disk call must resolve this
 # selected target instead.
@@ -130,9 +337,9 @@ reinstall_cmdline_apply_token() {
         finalos_modloop | finalos_releasever | finalos_repo | finalos_squashfs | \
         finalos_udeb_mirror | finalos_vmlinuz | \
         extra_addrs | extra_allow_ping | extra_cloud_image | extra_confhome | extra_deb_mirror | \
-        extra_elts | extra_force_boot_mode | extra_force_cn | extra_force_old_windows_setup | \
+        extra_dns_mode | extra_dns_servers | extra_elts | extra_force_boot_mode | extra_force_cn | extra_force_old_windows_setup | \
         extra_hold | extra_kernel | extra_link_grub_dir | extra_localtest | extra_main_disk | \
-        extra_filesystem | extra_mirrorlist | extra_no_auto_drivers | extra_no_cloud_kernel | extra_rdp_port | \
+        extra_filesystem | extra_ip_mode | extra_mirrorlist | extra_no_auto_drivers | extra_no_cloud_kernel | extra_rdp_port | \
         extra_source_id | extra_ssh_port | extra_username | extra_web_path | extra_web_port) ;;
     *) return 0 ;;
     esac
@@ -151,12 +358,15 @@ reinstall_cmdline_apply_token() {
     extra_allow_ping) allow_ping=$_reinstall_value ;;
     extra_cloud_image) cloud_image=$_reinstall_value ;;
     extra_deb_mirror) deb_mirror=$_reinstall_value ;;
+    extra_dns_mode) dns_mode=$_reinstall_value ;;
+    extra_dns_servers) dns_servers=$_reinstall_value ;;
     extra_elts) elts=$_reinstall_value ;;
     extra_force_boot_mode) force_boot_mode=$_reinstall_value ;;
     extra_force_cn) force_cn=$_reinstall_value ;;
     extra_force_old_windows_setup) force_old_windows_setup=$_reinstall_value ;;
     extra_filesystem) filesystem=$_reinstall_value ;;
     extra_hold) hold=$_reinstall_value ;;
+    extra_ip_mode) ip_mode=$_reinstall_value ;;
     extra_kernel) kernel=$_reinstall_value ;;
     extra_link_grub_dir) link_grub_dir=$_reinstall_value ;;
     extra_localtest) localtest=$_reinstall_value ;;
