@@ -235,6 +235,125 @@ else
 fi
 printf 'CHECKPOINT network/alpine-policy-cases: auto=skip static-dns=write DHCP+static-IP=write DHCP+dynamic-IP=skip missing-required-DNS=error\n'
 
+prepare_debian_dns_fixture() {
+    mkdir -p "$1/etc/dhcp"
+    cat >"$1/etc/dhcpcd.conf" <<'EOF'
+duid
+persistent
+option domain_name_servers, domain_name, domain_search
+EOF
+    cat >"$1/etc/dhcp/dhclient.conf" <<'EOF'
+supersede domain-name-servers 192.0.2.10;
+supersede dhcp6.name-servers 2001:db8::10;
+request subnet-mask, routers, domain-name, domain-name-servers;
+EOF
+    printf 'nameserver 192.0.2.200\n' >"$1/etc/resolv.conf"
+}
+
+prepare_debian_dns_fixture "$tmpdir/debian-static-dns"
+assert_eq "$(reinstall_network_apply_debian_dns_policy static false \
+    "$(printf '%s\n' 1.1.1.1 2606:4700:4700::1111)" \
+    "$tmpdir/debian-static-dns/etc/dhcpcd.conf" \
+    "$tmpdir/debian-static-dns/etc/dhcp/dhclient.conf" \
+    "$tmpdir/debian-static-dns/etc/resolv.conf")" persisted
+cat >"$tmpdir/expected-debian-dhcpcd.conf" <<'EOF'
+nohook resolv.conf
+duid
+persistent
+option domain_name_servers, domain_name, domain_search
+EOF
+cat >"$tmpdir/expected-debian-dhclient.conf" <<'EOF'
+supersede domain-name-servers 1.1.1.1;
+supersede dhcp6.name-servers 2606:4700:4700::1111;
+request subnet-mask, routers, domain-name, domain-name-servers;
+EOF
+diff -u "$tmpdir/expected-debian-dhcpcd.conf" "$tmpdir/debian-static-dns/etc/dhcpcd.conf"
+diff -u "$tmpdir/expected-debian-dhclient.conf" "$tmpdir/debian-static-dns/etc/dhcp/dhclient.conf"
+diff -u "$tmpdir/expected-resolv.conf" "$tmpdir/debian-static-dns/etc/resolv.conf"
+reinstall_network_write_debian_dns_config \
+    "$tmpdir/debian-static-dns/etc/dhcpcd.conf" \
+    "$tmpdir/debian-static-dns/etc/dhcp/dhclient.conf" \
+    "$tmpdir/debian-static-dns/etc/resolv.conf" \
+    '1.1.1.1,2606:4700:4700::1111'
+diff -u "$tmpdir/expected-debian-dhclient.conf" "$tmpdir/debian-static-dns/etc/dhcp/dhclient.conf"
+
+prepare_debian_dns_fixture "$tmpdir/debian-static-ipv6-dns"
+reinstall_network_write_debian_dns_config \
+    "$tmpdir/debian-static-ipv6-dns/etc/dhcpcd.conf" \
+    "$tmpdir/debian-static-ipv6-dns/etc/dhcp/dhclient.conf" \
+    "$tmpdir/debian-static-ipv6-dns/etc/resolv.conf" \
+    '2001:db8::53'
+cat >"$tmpdir/expected-debian-ipv6-dhclient.conf" <<'EOF'
+supersede dhcp6.name-servers 2001:db8::53;
+request subnet-mask, routers, domain-name, domain-name-servers;
+EOF
+cat >"$tmpdir/expected-debian-ipv6-resolv.conf" <<'EOF'
+nameserver 2001:db8::53
+EOF
+diff -u "$tmpdir/expected-debian-ipv6-dhclient.conf" \
+    "$tmpdir/debian-static-ipv6-dns/etc/dhcp/dhclient.conf"
+diff -u "$tmpdir/expected-debian-ipv6-resolv.conf" \
+    "$tmpdir/debian-static-ipv6-dns/etc/resolv.conf"
+
+prepare_debian_dns_fixture "$tmpdir/debian-dhcp-dns-static-ip"
+assert_eq "$(reinstall_network_apply_debian_dns_policy dhcp true \
+    "$(printf '%s\n' 192.0.2.53 2001:db8::53)" \
+    "$tmpdir/debian-dhcp-dns-static-ip/etc/dhcpcd.conf" \
+    "$tmpdir/debian-dhcp-dns-static-ip/etc/dhcp/dhclient.conf" \
+    "$tmpdir/debian-dhcp-dns-static-ip/etc/resolv.conf")" persisted
+cat >"$tmpdir/expected-debian-dhcp-resolv.conf" <<'EOF'
+nameserver 192.0.2.53
+nameserver 2001:db8::53
+EOF
+diff -u "$tmpdir/expected-debian-dhcp-resolv.conf" \
+    "$tmpdir/debian-dhcp-dns-static-ip/etc/resolv.conf"
+
+prepare_debian_dns_fixture "$tmpdir/debian-dhcp-dynamic"
+assert_eq "$(reinstall_network_apply_debian_dns_policy dhcp false '192.0.2.53' \
+    "$tmpdir/debian-dhcp-dynamic/etc/dhcpcd.conf" \
+    "$tmpdir/debian-dhcp-dynamic/etc/dhcp/dhclient.conf" \
+    "$tmpdir/debian-dhcp-dynamic/etc/resolv.conf")" skipped
+assert_eq "$(cat "$tmpdir/debian-dhcp-dynamic/etc/resolv.conf")" 'nameserver 192.0.2.200'
+
+if reinstall_network_apply_debian_dns_policy static false '' \
+    "$tmpdir/debian-dhcp-dynamic/etc/dhcpcd.conf" \
+    "$tmpdir/debian-dhcp-dynamic/etc/dhcp/dhclient.conf" \
+    "$tmpdir/debian-dhcp-dynamic/etc/resolv.conf"; then
+    printf 'accepted missing DNS for a persisted Debian DNS policy\n' >&2
+    exit 1
+else
+    [ "$?" -eq 2 ]
+fi
+if reinstall_network_apply_debian_dns_policy static false "1.1.1.1;touch $marker" \
+    "$tmpdir/debian-dhcp-dynamic/etc/dhcpcd.conf" \
+    "$tmpdir/debian-dhcp-dynamic/etc/dhcp/dhclient.conf" \
+    "$tmpdir/debian-dhcp-dynamic/etc/resolv.conf"; then
+    printf 'accepted shell syntax for Debian DNS configuration\n' >&2
+    exit 1
+fi
+[ ! -e "$marker" ]
+grep -Fq 'reinstall_network_apply_debian_dns_policy' "$repo_root/debian.cfg"
+grep -Fq 'extract_env_from_cmdline' "$repo_root/reinstall.sh"
+grep -Fq 'cp /etc/network/interfaces /configs/network-interfaces' "$repo_root/reinstall.sh"
+grep -Fq 'cp /configs/network-interfaces /target/etc/network/interfaces' "$repo_root/debian.cfg"
+awk '
+    /^d-i preseed\/late_command string / {
+        active = 1
+        sub(/^d-i preseed\/late_command string /, "")
+    }
+    active {
+        continued = ($0 ~ /\\$/)
+        sub(/[[:space:]]*\\$/, "")
+        printf "%s ", $0
+        if (!continued) {
+            print ""
+            exit
+        }
+    }
+' "$repo_root/debian.cfg" >"$tmpdir/debian-late-command.sh"
+sh -n "$tmpdir/debian-late-command.sh"
+printf 'CHECKPOINT network/debian-target-dns: DNS policy cases pass; initrd IP configuration reaches target; late_command parses\n'
+
 reinstall_network_render_dns_config nixos '1.1.1.1,2606:4700:4700::1111' >"$tmpdir/nixos"
 cat >"$tmpdir/expected-nixos" <<'EOF'
   nameservers = [

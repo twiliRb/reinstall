@@ -4123,7 +4123,11 @@ EOF
     insert_into_file $initrd_dir/trans.sh after '^: main' <<EOF
         distro=$nextos_distro
         releasever=$nextos_releasever
+        extract_env_from_cmdline
         create_ifupdown_config /etc/network/interfaces
+        mkdir -p /configs
+        cp /etc/network/interfaces /configs/network-interfaces
+        echo "CHECKPOINT debian/initrd-network-config: saved selected IP and DNS policy for the installed system"
         exit
 EOF
     # 2. 删除 debian busybox 无法识别的语法

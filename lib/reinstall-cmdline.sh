@@ -276,6 +276,73 @@ reinstall_network_write_alpine_dns_config() {
         mv -f "$_reinstall_resolv_tmp" "$_reinstall_resolv_conf"
 }
 
+reinstall_network_write_debian_dns_config() {
+    local _reinstall_dhcpcd_conf=$1 _reinstall_dhclient_conf=$2
+    local _reinstall_resolv_conf=$3 _reinstall_servers=$4
+    local _reinstall_dhclient_tmp _reinstall_ipv4_servers _reinstall_ipv6_servers
+
+    reinstall_network_validate_dns_servers "$_reinstall_servers" || return 1
+
+    mkdir -p "$(dirname "$_reinstall_dhcpcd_conf")" || return 1
+    [ -f "$_reinstall_dhcpcd_conf" ] || : >"$_reinstall_dhcpcd_conf" || return 1
+    reinstall_network_write_alpine_dns_config \
+        "$_reinstall_dhcpcd_conf" "$_reinstall_resolv_conf" "$_reinstall_servers" || return 1
+
+    mkdir -p "$(dirname "$_reinstall_dhclient_conf")" || return 1
+    _reinstall_dhclient_tmp=$(mktemp "${_reinstall_dhclient_conf}.XXXXXX") || return 1
+    _reinstall_ipv4_servers=$(reinstall_network_filter_dns_servers "$_reinstall_servers" 4 |
+        tr '\n' ',' | sed 's/,$//')
+    _reinstall_ipv6_servers=$(reinstall_network_filter_dns_servers "$_reinstall_servers" 6 |
+        tr '\n' ',' | sed 's/,$//')
+    {
+        if [ -n "$_reinstall_ipv4_servers" ]; then
+            _reinstall_ipv4_servers=$(printf '%s' "$_reinstall_ipv4_servers" | sed 's/,/, /g')
+            printf 'supersede domain-name-servers %s;\n' "$_reinstall_ipv4_servers"
+        fi
+        if [ -n "$_reinstall_ipv6_servers" ]; then
+            _reinstall_ipv6_servers=$(printf '%s' "$_reinstall_ipv6_servers" | sed 's/,/, /g')
+            printf 'supersede dhcp6.name-servers %s;\n' "$_reinstall_ipv6_servers"
+        fi
+        if [ -f "$_reinstall_dhclient_conf" ]; then
+            awk '!/^[[:space:]]*supersede[[:space:]]+(domain-name-servers|dhcp6[.]name-servers)[[:space:]]/' \
+                "$_reinstall_dhclient_conf"
+        fi
+    } >"$_reinstall_dhclient_tmp" || {
+        rm -f "$_reinstall_dhclient_tmp"
+        return 1
+    }
+    chmod 644 "$_reinstall_dhclient_tmp" || {
+        rm -f "$_reinstall_dhclient_tmp"
+        return 1
+    }
+    mv -f "$_reinstall_dhclient_tmp" "$_reinstall_dhclient_conf"
+}
+
+reinstall_network_apply_debian_dns_policy() {
+    local _reinstall_mode=$1 _reinstall_target_has_static_ip=$2 _reinstall_dns_list=$3
+    local _reinstall_dhcpcd_conf=$4 _reinstall_dhclient_conf=$5
+    local _reinstall_resolv_conf=$6 _reinstall_dns_csv
+
+    case "$_reinstall_mode" in auto | dhcp | static) ;; *) return 1 ;; esac
+    case "$_reinstall_target_has_static_ip" in true | false) ;; *) return 1 ;; esac
+
+    if ! reinstall_network_should_persist_dns \
+        "$_reinstall_mode" "$_reinstall_target_has_static_ip"; then
+        printf 'skipped\n'
+        return 0
+    fi
+    if ! reinstall_network_require_target_dns \
+        "$_reinstall_mode" "$_reinstall_target_has_static_ip" "$_reinstall_dns_list"; then
+        return 2
+    fi
+
+    _reinstall_dns_csv=$(printf '%s\n' "$_reinstall_dns_list" | tr '\n' ',' | sed 's/,$//')
+    reinstall_network_write_debian_dns_config \
+        "$_reinstall_dhcpcd_conf" "$_reinstall_dhclient_conf" \
+        "$_reinstall_resolv_conf" "$_reinstall_dns_csv" || return 3
+    printf 'persisted\n'
+}
+
 reinstall_network_apply_alpine_dns_policy() {
     local _reinstall_mode=$1 _reinstall_target_has_static_ip=$2 _reinstall_dns_list=$3
     local _reinstall_dhcpcd_conf=$4 _reinstall_resolv_conf=$5 _reinstall_dns_csv
