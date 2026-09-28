@@ -100,7 +100,7 @@ jobs:
             --workdir /workspace \
             --entrypoint /bin/sh \
             "$DISTRO_IMAGE" \
-            -ec 'sh tests/test_reinstall_btrfs_target_config.sh && sh tests/test_reinstall_network.sh'
+            tests/run_linux_container_contract.sh
 
   btrfs-install-dry-run:
     name: Btrfs install dry-run
