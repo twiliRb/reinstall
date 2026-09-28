@@ -4406,7 +4406,7 @@ EOF
         # echo "wget --no-check-certificate -O- $confhome/trans.sh | /bin/ash" >\$sysroot/etc/local.d/trans.start
         # wget --no-check-certificate -O \$sysroot/etc/local.d/trans.start $confhome/trans.sh
         cp /trans.sh \$sysroot/etc/local.d/trans.start
-        cp /reinstall-cmdline.sh /reinstall-btrfs-layout.sh /windows-serialize.sh \$sysroot/
+        cp /reinstall-cmdline.sh /reinstall-btrfs-layout.sh /windows-serialize.sh /reinstall-ssh.sh \$sysroot/
         chmod a+x \$sysroot/etc/local.d/trans.start
         ln -s /etc/init.d/local \$sysroot/etc/runlevels/default/
 
@@ -4476,8 +4476,11 @@ This script is outdated, please download reinstall.sh again.
     curl -Lo "$initrd_dir/reinstall-cmdline.sh" "$confhome/lib/reinstall-cmdline.sh"
     curl -Lo "$initrd_dir/reinstall-btrfs-layout.sh" "$confhome/lib/reinstall-btrfs-layout.sh"
     curl -Lo "$initrd_dir/windows-serialize.sh" "$confhome/lib/windows-serialize.sh"
+    curl -Lo "$initrd_dir/reinstall-ssh.sh" "$confhome/lib/reinstall-ssh.sh"
     [ -s "$initrd_dir/reinstall-btrfs-layout.sh" ] ||
         error_and_exit "Downloaded pinned Btrfs layout planner is empty."
+    [ -s "$initrd_dir/reinstall-ssh.sh" ] ||
+        error_and_exit "Downloaded pinned SSH key writer is empty."
     chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh
 
     # 保存配置

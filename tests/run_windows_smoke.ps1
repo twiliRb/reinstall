@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $installer = Join-Path $PSScriptRoot '..\reinstall.bat'
 $sourcePattern = "raw.githubusercontent.com/twiliRb/reinstall/$($env:REINSTALL_SOURCE_COMMIT)/lib/reinstall-cmdline.sh"
+$testSshKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj7Ml2PQbt9pkYbcXn6axzAP2ZKZh0PTLg1dp8R5ROy ci@reinstall'
 $cases = @(
     @{
         Name = 'AlmaLinux'
@@ -16,12 +17,12 @@ $cases = @(
     @{
         Name = 'Debian'
         Arguments = @('--username', 'x', '--password', 'x', 'debian')
-        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS DEBIAN 13', 'image=File type: qemu', 'next-os=SET NEXTOS ALPINE 3.24', 'network=NETWORK INFO', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS DEBIAN 13', 'network=NETWORK INFO', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
     },
     @{
-        Name = 'Debian cloud-init with network modes'
-        Arguments = @('--username', 'x', '--password', 'x', '--ip-mode', 'dhcp', '--dns-mode', 'static', '--dns-servers', '1.1.1.1', 'debian', '--ci')
-        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS DEBIAN 13', 'network=NETWORK INFO', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+        Name = 'Debian cloud-init network, SSH key and ext4'
+        Arguments = @('--username', 'x', '--ssh-key', $testSshKey, '--ssh-port', '2222', '--filesystem', 'ext4', '--ip-mode', 'dhcp', '--dns-mode', 'static', '--dns-servers', '1.1.1.1', 'debian', '--ci')
+        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS DEBIAN 13', 'network=NETWORK INFO', 'ssh-key=Public Key: ssh-ed25519', 'ssh-port=SSH Port: 2222', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
     },
     @{
         Name = 'netboot.xyz'
@@ -34,9 +35,9 @@ $cases = @(
         Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS DD', 'image=File type: raw.tar.xz', 'firmware=DD: Image is EFI.')
     },
     @{
-        Name = 'Windows image'
-        Arguments = @('--username', 'x', '--password', 'x', 'windows', '--image-name=Windows Server blah', '--iso', 'https://aka.ms/HCIReleaseImage')
-        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS WINDOWS', 'image=File type: iso')
+        Name = 'Windows image and remote-access ports'
+        Arguments = @('--username', 'x', '--password', 'x', '--ssh-port', '2222', '--rdp-port', '3390', '--web-port', '8080', 'windows', '--image-name=Windows Server blah', '--iso', 'https://aka.ms/HCIReleaseImage')
+        Checkpoints = @("source=$sourcePattern", 'selection=SET FINALOS WINDOWS', 'image=File type: iso', 'ssh-port=SSH Port: 2222', 'rdp-port=RDP Port: 3390', 'web-log=WEB: http://IP:8080')
     },
     @{
         Name = 'Reset'

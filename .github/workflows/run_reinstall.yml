@@ -22,8 +22,8 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends shellcheck xmlstarlet
-          printf 'CHECKPOINT static/dependencies: shellcheck=available xmlstarlet=available\n'
+          sudo apt-get install --yes --no-install-recommends e2fsprogs shellcheck xmlstarlet
+          printf 'CHECKPOINT static/dependencies: e2fsprogs=available shellcheck=available xmlstarlet=available\n'
       - name: Check shell syntax
         run: |
           mapfile -d '' shell_files < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
@@ -44,12 +44,18 @@ jobs:
             tests/test_reinstall_alpine_initrd.sh
       - name: Test command-line parser and serializer
         run: bash tests/test_reinstall_cmdline.sh
+      - name: Test SSH authorized_keys writer
+        run: sh tests/test_reinstall_ssh.sh
       - name: Test network mode policy and configuration
         run: sh tests/test_reinstall_network.sh
       - name: Test smoke checkpoint output contract
         run: bash tests/test_smoke_output.sh
       - name: Test Btrfs layout planner
         run: bash tests/test_reinstall_btrfs_layout.sh
+      - name: Test ext4 layout planner
+        run: sh tests/test_reinstall_ext4_layout.sh
+      - name: Test ext4 root formatter
+        run: sh tests/test_reinstall_ext4_format.sh
       - name: Test Btrfs target configuration
         run: sh tests/test_reinstall_btrfs_target_config.sh
       - name: Test Windows value and XML serializers
@@ -172,6 +178,63 @@ jobs:
               bash tests/reinstall_btrfs_reboot_dry_run.sh verify-all /artifacts
             '
 
+  ext4-install-dry-run:
+    name: ext4 install dry-run
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/custom') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create ext4 targets for Alpine and Arch
+        run: |
+          mkdir -p artifacts/reinstall-ext4
+          docker run --privileged --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$GITHUB_WORKSPACE/artifacts/reinstall-ext4:/artifacts:rw" \
+            --workdir /workspace \
+            --entrypoint /bin/bash \
+            ubuntu:24.04 -euc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+                dosfstools e2fsprogs util-linux coreutils
+              sh tests/reinstall_ext4_reboot_dry_run.sh prepare-all /artifacts
+            '
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reinstall-ext4-target-trees
+          path: artifacts/reinstall-ext4/
+          if-no-files-found: error
+          retention-days: 1
+
+  ext4-post-reboot-dry-run:
+    name: ext4 post-reboot validation
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/custom') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: ext4-install-dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v8.0.1
+        with:
+          name: reinstall-ext4-target-trees
+          path: artifacts/reinstall-ext4/
+      - name: Remount ext4 target trees in a fresh privileged container
+        run: |
+          docker run --privileged --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$GITHUB_WORKSPACE/artifacts/reinstall-ext4:/artifacts:rw" \
+            --workdir /workspace \
+            --entrypoint /bin/bash \
+            ubuntu:24.04 -euc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+                dosfstools e2fsprogs util-linux coreutils
+              sh tests/reinstall_ext4_reboot_dry_run.sh verify-all /artifacts
+            '
+
   smoke:
     name: Installer smoke (${{ matrix.os }})
     if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/custom') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -194,12 +257,22 @@ jobs:
           source_checkpoint="helper=raw.githubusercontent.com/twiliRb/reinstall/$REINSTALL_SOURCE_COMMIT/lib/reinstall-cmdline.sh"
           run_smoke_check 'AlmaLinux' "$source_checkpoint" 'selection=SET FINALOS ALMALINUX' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x almalinux
           run_smoke_check 'Ubuntu' "$source_checkpoint" 'selection=SET FINALOS UBUNTU 26.04' 'image=File type: qemu' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x ubuntu
-          run_smoke_check 'Debian' "$source_checkpoint" 'selection=SET FINALOS DEBIAN 13' 'image=File type: qemu' 'next-os=SET NEXTOS ALPINE 3.24' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x debian
-          run_smoke_check 'Debian cloud-init with network modes' "$source_checkpoint" 'next-os=SET NEXTOS DEBIAN 13' 'network=NETWORK INFO' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
+          run_smoke_check 'Debian' "$source_checkpoint" 'next-os=SET NEXTOS DEBIAN 13' 'network=NETWORK INFO' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x debian
+          run_smoke_check 'Debian cloud-init network, SSH key and ext4' "$source_checkpoint" 'next-os=SET NEXTOS DEBIAN 13' 'network=NETWORK INFO' 'ssh-key=Public Key: ssh-ed25519' 'ssh-port=SSH Port: 2222' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --ssh-key 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj7Ml2PQbt9pkYbcXn6axzAP2ZKZh0PTLg1dp8R5ROy ci@reinstall' --ssh-port 2222 --filesystem ext4 --ip-mode dhcp --dns-mode static --dns-servers 1.1.1.1 debian --ci
           run_smoke_check 'netboot.xyz' 'target=SET NEXTOS NETBOOT.XYZ' 'image-url=https://boot.netboot.xyz/ipxe/netboot.xyz.efi' 'boot-entry=ADD EFI ENTRY IN LINUX' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh netboot.xyz
           run_smoke_check 'Debian image' "$source_checkpoint" 'selection=SET FINALOS DD' 'image=File type: raw.tar.xz' 'firmware=DD: Image is EFI.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x dd --img=https://cloud.debian.org/images/cloud/sid/daily/latest/debian-sid-nocloud-amd64-daily.tar.xz
-          run_smoke_check 'Windows image' "$source_checkpoint" 'selection=SET FINALOS WINDOWS' 'image=File type: iso' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
+          run_smoke_check 'Windows image and remote-access ports' "$source_checkpoint" 'selection=SET FINALOS WINDOWS' 'image=File type: iso' 'ssh-port=SSH Port: 2222' 'rdp-port=RDP Port: 3390' 'web-log=WEB: http://IP:8080' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ssh-port 2222 --rdp-port 3390 --web-port 8080 windows --image-name='Windows Server blah' --iso https://aka.ms/HCIReleaseImage
           run_smoke_check 'Reset' 'reset=reset done.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh reset
+      - name: Verify CLI preflight rejections happen before disk operations
+        if: runner.os == 'Linux'
+        run: |
+          source tests/smoke-quiet.sh
+          test_ssh_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj7Ml2PQbt9pkYbcXn6axzAP2ZKZh0PTLg1dp8R5ROy ci@reinstall'
+          run_smoke_failure_check 'invalid filesystem' 'Invalid --filesystem value: invalid' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem invalid debian --ci
+          run_smoke_failure_check 'unsupported Btrfs target' '--filesystem=btrfs is supported only for Arch, Gentoo, NixOS, and AOSC.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem btrfs debian --ci
+          run_smoke_failure_check 'static DNS without servers' '--dns-mode=static requires --dns-servers.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --dns-mode static debian --ci
+          run_smoke_failure_check 'invalid SSH port' 'Invalid --ssh-port value: 0' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ssh-port 0 debian --ci
+          run_smoke_failure_check 'password and SSH key conflict' 'Cannot set both password and ssh key.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --username x --password x --ssh-key "$test_ssh_key" debian --ci
       - name: Run Windows smoke checks
         if: runner.os == 'Windows'
         shell: pwsh

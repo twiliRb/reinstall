@@ -106,6 +106,15 @@ if ! [ -r "$windows_helper" ]; then
 fi
 . "$windows_helper"
 
+ssh_helper=/reinstall-ssh.sh
+if ! [ -r "$ssh_helper" ]; then
+    ssh_helper="$(dirname "$0")/lib/reinstall-ssh.sh"
+fi
+if ! [ -r "$ssh_helper" ]; then
+    error_and_exit "Missing pinned SSH key writer."
+fi
+. "$ssh_helper"
+
 is_run_from_locald() {
     [[ "$0" = "/etc/local.d/*" ]]
 }
@@ -386,41 +395,7 @@ download() {
 }
 
 update_part() {
-    sleep 1
-    sync
-    sleep 1
-
-    # partprobe
-    # 有分区挂载中会报 Resource busy 错误
-    if is_have_cmd partprobe; then
-        partprobe /dev/$xda 2>/dev/null || true
-        sleep 1
-    fi
-
-    # partx
-    # https://access.redhat.com/solutions/199573
-    if is_have_cmd partx; then
-        partx -u /dev/$xda
-        sleep 1
-    fi
-
-    # mdev
-    # mdev 不会删除 /dev/disk/ 的旧分区，因此手动删除
-    # 如果 rm -rf 的时候刚好 mdev 在创建链接，rm -rf 会报错 Directory not empty
-    # 因此要先停止 mdev 服务
-    # 还要删除 /dev/$xda*?
-    ensure_service_stopped mdev
-    sleep 1
-    # 即使停止了 mdev，有时也会报 Directory not empty，因此添加 retry
-    retry 5 rm -rf /dev/disk/*
-
-    # 没挂载 modloop 时会提示
-    # modprobe: can't change directory to '/lib/modules': No such file or directory
-    # 因此强制不显示上面的提示
-    mdev -sf 2>/dev/null
-    sleep 1
-    ensure_service_started mdev 2>/dev/null
-    sleep 1
+    reinstall_refresh_partitions "/dev/$xda"
 }
 
 is_efi() {
@@ -3462,42 +3437,17 @@ EOF
             umount "$btrfs_top_level"
             rmdir "$btrfs_top_level"
         else
-            # alpine 本身关闭了 64bit ext4
-            # https://gitlab.alpinelinux.org/alpine/alpine-conf/-/blob/3.18.1/setup-disk.in?ref_type=tags#L908
-            # 而且 alpine 的 extlinux 不兼容 64bit ext4
-            [ "$distro" = alpine ] && ext4_opts="-O ^64bit" || ext4_opts=
+            local boot_mode disk_size
+
             if is_efi; then
-                # efi
-                parted /dev/$xda -s -- \
-                    mklabel gpt \
-                    mkpart '" "' fat32 1MiB 101MiB \
-                    mkpart '" "' ext4 101MiB 100% \
-                    set 1 boot on
-                update_part
-
-                mkfs.fat "/dev/$(xda 1)"                #1 efi
-                mkfs.ext4 -F $ext4_opts "/dev/$(xda 2)" #2 os
-            elif is_xda_gt_2t; then
-                # bios > 2t
-                parted /dev/$xda -s -- \
-                    mklabel gpt \
-                    mkpart '" "' ext4 1MiB 2MiB \
-                    mkpart '" "' ext4 2MiB 100% \
-                    set 1 bios_grub on
-                update_part
-
-                echo                                    #1 bios_boot
-                mkfs.ext4 -F $ext4_opts "/dev/$(xda 2)" #2 os
+                boot_mode=efi
             else
-                # bios
-                parted /dev/$xda -s -- \
-                    mklabel msdos \
-                    mkpart primary ext4 1MiB 100% \
-                    set 1 boot on
-                update_part
-
-                mkfs.ext4 -F $ext4_opts "/dev/$(xda 1)" #1 os
+                boot_mode=bios
             fi
+            disk_size=$(get_disk_size "/dev/$xda")
+            reinstall_ext4_create_partitions "/dev/$xda" "$boot_mode" \
+                "$disk_size" "$distro" update_part ||
+                error_and_exit "Could not create and format the ext4 partitions."
         fi
     else
         # 安装红帽系或ubuntu
@@ -4808,30 +4758,12 @@ set_ssh_keys_and_del_password() {
     fi
 
     # 添加公钥
-    if true; then
-        (
-            umask 077
-            mkdir -p "$os_dir/$user_home/.ssh"
-            cat /configs/ssh_keys >"$os_dir/$user_home/.ssh/authorized_keys"
-        )
-        # 注意要用 chroot，否则 uid/gid 是 alpine live os 下的 uid/gid
-        chroot "$os_dir" chown "$username:$username" "$user_home"
-        chroot "$os_dir" chown "$username:$username" "$user_home/.ssh"
-        chroot "$os_dir" chown "$username:$username" "$user_home/.ssh/authorized_keys"
-    else
-        (
-            # 如果日后添加 bsd 无法 chroot 时可以这样
-            umask 077
-            read -r owner group < \
-                <(awk -F: -v user="$username" '$1==user {print $3,$4}' "$os_dir/etc/passwd")
-            install -D \
-                -m 600 \
-                -o "$owner" \
-                -g "$group" \
-                /configs/ssh_keys \
-                "$os_dir/$user_home/.ssh/authorized_keys"
-        )
-    fi
+    reinstall_ssh_write_authorized_keys "$os_dir" "$user_home" /configs/ssh_keys ||
+        error_and_exit "Failed to install SSH authorized keys into the target filesystem."
+    # 注意要用 chroot，否则 uid/gid 是 alpine live os 下的 uid/gid
+    chroot "$os_dir" chown "$username:$username" "$user_home"
+    chroot "$os_dir" chown "$username:$username" "$user_home/.ssh"
+    chroot "$os_dir" chown "$username:$username" "$user_home/.ssh/authorized_keys"
 
     # 删除密码/锁定用户
     del_user_password_and_lock "$os_dir" "$username"
@@ -6578,6 +6510,7 @@ mount_part_basic_layout() {
     local os_dir=$1
     local efi_dir=$2
     local layout_plan
+    local ext4_layout_plan boot_mode disk_size
 
     # 挂载系统分区
     mkdir -p "$os_dir"
@@ -6599,10 +6532,18 @@ mount_part_basic_layout() {
         mkdir -p "$os_dir/boot"
         mount -t btrfs -o "subvol=$btrfs_boot_subvolume" "$btrfs_device" "$os_dir/boot"
     else
-        if is_efi || is_xda_gt_2t; then
-            os_part_num=2
+        if is_efi; then
+            boot_mode=efi
         else
-            os_part_num=1
+            boot_mode=bios
+        fi
+        disk_size=$(get_disk_size "/dev/$xda")
+        ext4_layout_plan=$(reinstall_ext4_layout_plan "$boot_mode" "$disk_size") ||
+            error_and_exit "Could not calculate the ext4 mount layout."
+        os_part_num=$(printf '%s\n' "$ext4_layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "root" {print $2}')
+        efi_part_num=$(printf '%s\n' "$ext4_layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "esp" {print $2}')
+        if [ -z "$os_part_num" ] || { is_efi && [ -z "$efi_part_num" ]; }; then
+            error_and_exit "Invalid ext4 mount layout."
         fi
         mount -t ext4 "/dev/$(xda $os_part_num)" "$os_dir"
     fi
@@ -6613,7 +6554,7 @@ mount_part_basic_layout() {
         if [ "$filesystem" = btrfs ]; then
             btrfs_efi_device="/dev/$(xda "$efi_part_num")"
         else
-            btrfs_efi_device="/dev/$(xda 1)"
+            btrfs_efi_device="/dev/$(xda "$efi_part_num")"
         fi
         mount -t vfat -o umask=077 "$btrfs_efi_device" "$efi_dir"
     fi

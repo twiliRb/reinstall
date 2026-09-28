@@ -31,6 +31,28 @@ missing_status=$?
 [[ "$missing_output" == *'FAIL missing phase: checkpoint download missing'* ]]
 [[ "$missing_output" == *'partial output'* ]]
 
+rejection_output=$(run_smoke_failure_check 'expected preflight rejection' \
+    'Invalid --filesystem value: invalid' -- \
+    sh -c 'printf "Invalid --filesystem value: invalid\n" >&2; exit 1')
+[[ "$rejection_output" == $'RUN expected preflight rejection\nCHECKPOINT expected preflight rejection/rejection: Invalid --filesystem value: invalid\nCHECKPOINT expected preflight rejection/no-disk-operations: no parted, mkfs, wipefs, or Create Part marker observed\nPASS expected preflight rejection' ]]
+
+unexpected_success=$(run_smoke_failure_check 'unexpected success' 'expected error' -- \
+    sh -c 'printf "command succeeded unexpectedly\n"' 2>&1) && {
+    printf 'failure wrapper accepted a successful command\n' >&2
+    exit 1
+}
+[[ "$unexpected_success" == *'FAIL unexpected success: command unexpectedly succeeded'* ]]
+[[ "$unexpected_success" == *'command succeeded unexpectedly'* ]]
+
+unsafe_rejection=$(run_smoke_failure_check 'late rejection' 'expected error' -- \
+    sh -c 'printf "Create Part\nexpected error\n" >&2; exit 1' 2>&1) && {
+    printf 'failure wrapper accepted a rejection after disk operations began\n' >&2
+    exit 1
+}
+[[ "$unsafe_rejection" == *'FAIL late rejection: disk operation marker appeared before rejection'* ]]
+[[ "$unsafe_rejection" == *'Create Part'* ]]
+
 printf 'CHECKPOINT smoke wrapper success: emitted matched phase output and PASS result\n'
 printf 'CHECKPOINT smoke wrapper failure: nonzero exit and missing phases include captured output\n'
+printf 'CHECKPOINT smoke wrapper rejection: expected errors and preflight boundary are visible\n'
 printf 'Quiet smoke output tests passed.\n'

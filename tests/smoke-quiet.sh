@@ -55,3 +55,52 @@ run_smoke_check() {
     printf 'PASS %s\n' "$name"
     rm -f "$log"
 }
+
+# Validate expected CLI failures without hiding the preflight boundary. A
+# rejected value is only a PASS when the installer exits nonzero before any
+# partitioning or filesystem-formatting marker appears in its output.
+run_smoke_failure_check() {
+    local name=$1 expected_error=$2 status=0 log matched
+    shift 2
+
+    if [[ $# -eq 0 || $1 != -- ]]; then
+        printf 'FAIL %s: expected -- before failure-check command\n' "$name" >&2
+        return 2
+    fi
+    shift
+    if [[ $# -eq 0 ]]; then
+        printf 'FAIL %s: missing failure-check command\n' "$name" >&2
+        return 2
+    fi
+
+    log=$(mktemp) || return 1
+    printf 'RUN %s\n' "$name"
+    if "$@" >"$log" 2>&1; then
+        printf 'FAIL %s: command unexpectedly succeeded\n' "$name" >&2
+        cat "$log" >&2
+        rm -f "$log"
+        return 1
+    else
+        status=$?
+    fi
+
+    if ! matched=$(grep -F -m1 -- "$expected_error" "$log"); then
+        printf 'FAIL %s: expected error was missing (%s, exit %s)\n' \
+            "$name" "$expected_error" "$status" >&2
+        cat "$log" >&2
+        rm -f "$log"
+        return 1
+    fi
+    if grep -Eiq '(^|[[:space:]/])(parted|mkfs([.][[:alnum:]_-]+)?|wipefs)([[:space:]]|$)|Create Part' "$log"; then
+        printf 'FAIL %s: disk operation marker appeared before rejection (exit %s)\n' \
+            "$name" "$status" >&2
+        cat "$log" >&2
+        rm -f "$log"
+        return 1
+    fi
+
+    printf 'CHECKPOINT %s/rejection: %s\n' "$name" "$matched"
+    printf 'CHECKPOINT %s/no-disk-operations: no parted, mkfs, wipefs, or Create Part marker observed\n' "$name"
+    printf 'PASS %s\n' "$name"
+    rm -f "$log"
+}
