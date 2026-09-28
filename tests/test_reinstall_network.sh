@@ -116,6 +116,30 @@ assert_backend_status NetworkManager aosc 0
 assert_backend_status NetworkManager fnos 0
 printf 'CHECKPOINT network/backend-distro-policy: networkd=7 supported; NetworkManager=19 supported; auto=all; unsupported and unknown targets rejected\n'
 
+assert_eq "$(reinstall_network_openrc_service_name alpine NetworkManager)" networkmanager
+printf 'CHECKPOINT network/alpine-openrc-service: NetworkManager maps to installed networkmanager service\n'
+
+awk '
+    $0 == "configure_alpine_networkmanager_device_manager() {" { capture = 1 }
+    capture { print }
+    capture && $0 == "}" { exit }
+' "$repo_root/trans.sh" >"$tmpdir/alpine-networkmanager-device-manager"
+(
+    . "$tmpdir/alpine-networkmanager-device-manager"
+    expected_root=$tmpdir/alpine-udev-target
+    chroot() {
+        [ "$1" = "$expected_root" ] || return 1
+        shift
+        printf '%s\n' "$*"
+    }
+    error_and_exit() {
+        printf '%s\n' "$*" >&2
+        exit 1
+    }
+    assert_eq "$(configure_alpine_networkmanager_device_manager "$expected_root")" 'setup-devd udev'
+)
+printf 'CHECKPOINT network/alpine-networkmanager-udev: device-manager=udev setup=setup-devd\n'
+
 reinstall_network_set_cli_option --ip-mode static
 reinstall_network_set_cli_option --dns-mode static
 reinstall_network_set_cli_option --dns-servers '1.1.1.1,2606:4700:4700::1111'

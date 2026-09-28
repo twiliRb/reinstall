@@ -2028,6 +2028,13 @@ EOF
     done
 }
 
+configure_alpine_networkmanager_device_manager() {
+    local os_dir=$1
+
+    chroot "$os_dir" setup-devd udev ||
+        error_and_exit "Failed to configure Alpine eudev services for NetworkManager."
+}
+
 install_alpine() {
     info "install alpine"
 
@@ -2179,6 +2186,7 @@ install_alpine() {
 
     if [ "${network_backend:-auto}" = NetworkManager ]; then
         chroot /os apk add networkmanager eudev
+        configure_alpine_networkmanager_device_manager /os
         mkdir -p /os/etc/network
         cat <<'EOF' >/os/etc/network/interfaces
 auto lo
@@ -2187,7 +2195,9 @@ EOF
         chroot /os rc-update del networking boot || true
         chroot /os rc-update del dhcpcd default || true
         chroot /os rc-update add dbus default
-        chroot /os rc-update add NetworkManager default
+        networkmanager_service=$(reinstall_network_openrc_service_name "$distro" "$network_backend") ||
+            error_and_exit "No OpenRC service mapping for $distro/$network_backend."
+        chroot /os rc-update add "$networkmanager_service" default
         create_network_backend_profiles /os
         echo "CHECKPOINT network/backend-service: distro=alpine manager=NetworkManager enabled=OpenRC disabled=networking,dhcpcd"
     else

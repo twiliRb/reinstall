@@ -42,6 +42,18 @@ jobs:
             --entrypoint /bin/sh \
             alpine:3.24.2 \
             tests/test_reinstall_alpine_initrd.sh
+      - name: Test Alpine eudev service setup for NetworkManager
+        run: |
+          docker run --rm --entrypoint /bin/sh alpine:3.24.2 -ec '
+            apk add --no-cache alpine-conf eudev openrc
+            setup-devd udev
+            for service in udev udev-trigger udev-settle; do
+              test -L "/etc/runlevels/sysinit/$service"
+            done
+            test -L /etc/runlevels/default/udev-postmount
+            test ! -e /etc/runlevels/sysinit/mdev
+            printf "CHECKPOINT alpine/networkmanager-udev: sysinit=udev,udev-trigger,udev-settle postmount=enabled mdev=disabled\\n"
+          '
       - name: Test command-line parser and serializer
         run: bash tests/test_reinstall_cmdline.sh
       - name: Test SSH authorized_keys writer

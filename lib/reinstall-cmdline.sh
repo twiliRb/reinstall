@@ -70,6 +70,15 @@ reinstall_network_backend_supported_for_distro() {
     esac
 }
 
+# Resolve OpenRC's service script name for an explicitly selected backend.
+# Alpine packages NetworkManager with the lowercase `networkmanager` service.
+reinstall_network_openrc_service_name() {
+    case "$1:$2" in
+    alpine:NetworkManager) printf '%s\n' networkmanager ;;
+    *) return 1 ;;
+    esac
+}
+
 # Validate comma-separated IPv4/IPv6 DNS literals. This intentionally rejects
 # hostnames, zones, whitespace, and shell/config syntax so the values can be
 # used in Linux and Windows target configuration without interpreting them.
