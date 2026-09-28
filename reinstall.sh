@@ -4421,8 +4421,9 @@ EOF
     if [ "$nextos_releasever" = 3.24 ] &&
         txt_to_grep='done < "$ROOT"/sys/class/tty/"$1"/active' &&
         grep -qF "$txt_to_grep" init; then
+        alpine_tty_reader_replacement=$(reinstall_alpine_active_tty_reader_replacement)
         insert_into_file init replace "$txt_to_grep" -F <<EOF
-done < <(cat "\$ROOT"/sys/class/tty/"\$1"/active | xargs -n 1)
+$alpine_tty_reader_replacement
 EOF
     fi
 }
@@ -4994,6 +4995,9 @@ init_basearch
 init_confhome
 curl -fL "$confhome/lib/reinstall-cmdline.sh" -o "$tmp/reinstall-cmdline.sh"
 . "$tmp/reinstall-cmdline.sh"
+curl -fL "$confhome/lib/reinstall-alpine-initrd.sh" -o "$tmp/reinstall-alpine-initrd.sh"
+[ -s "$tmp/reinstall-alpine-initrd.sh" ] || error_and_exit "Downloaded pinned Alpine initrd helper is empty."
+. "$tmp/reinstall-alpine-initrd.sh"
 if reinstall_validate_filesystem "$filesystem" "$distro"; then
     :
 else

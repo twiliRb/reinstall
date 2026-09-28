@@ -27,6 +27,14 @@ jobs:
         run: find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
       - name: Run ShellCheck
         run: find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck --severity=error
+      - name: Test Alpine initrd compatibility under BusyBox ash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            --entrypoint /bin/sh \
+            alpine:3.24.2 \
+            tests/test_reinstall_alpine_initrd.sh
       - name: Test command-line, Btrfs layout, and Windows serializers
         run: |
           bash tests/test_reinstall_cmdline.sh
