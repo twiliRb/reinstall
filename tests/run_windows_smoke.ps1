@@ -27,7 +27,7 @@ $cases = @(
     @{
         Name = 'Debian systemd-networkd'
         Arguments = @('--username', 'x', '--password', 'x', '--ip-mode', 'dhcp', '--dns-mode', 'dhcp', '--network-backend', 'systemd-networkd', 'debian', '--ci')
-        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS DEBIAN 13', 'network=NETWORK INFO', 'network-backend=CHECKPOINT network-backend/cmdline: selected=systemd-networkd encoded=base64', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
+        Checkpoints = @("source=$sourcePattern", 'next-os=SET NEXTOS ALPINE 3.24', 'network=NETWORK INFO', 'network-backend=CHECKPOINT network-backend/cmdline: selected=systemd-networkd encoded=base64', 'boot-entry=ADD EFI ENTRY IN WINDOWS')
     },
     @{
         Name = 'netboot.xyz'
