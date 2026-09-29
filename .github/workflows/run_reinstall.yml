@@ -84,7 +84,7 @@ jobs:
       - name: Test Fedora Btrfs adapter
         run: bash tests/test_reinstall_fedora_btrfs_adapter.sh
       - name: Test Debian Btrfs adapter
-        run: sh tests/test_reinstall_debian_btrfs_adapter.sh
+        run: bash tests/test_reinstall_debian_btrfs_adapter.sh
       - name: Test GRUB update hook
         run: sh tests/test_reinstall_grub_hook.sh
       - name: Test Windows value and XML serializers
