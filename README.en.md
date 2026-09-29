@@ -176,6 +176,10 @@ bash reinstall.sh anolis      7|8|23
 - `--ssh-key KEY` Set up SSH login public key, [formatted as follows](#--ssh-key). When using public key, password is empty.
 - `--ssh-port PORT` Change the SSH port
 - `--web-port PORT` Change the Web port (for log observation during installation only)
+- `--filesystem=ext4|btrfs` Select the root filesystem. The default is `ext4`.
+- `--btrfs-compression=zstd|zlib|lzo|none` Select the Btrfs compression method; the default is `zstd`. `none` omits a compression mount option.
+- `--btrfs-compression-level=N` Set the zstd or zlib level. Omitted or `0` uses the algorithm default; LZO has no level.
+- `--btrfs-options=OPTIONS` Replace the complete Btrfs mount-option list and cannot be combined with the two compression options. For example, `compress=zstd:3,noatime,discard=async`. Only known options supported by the target kernel are accepted. Conflicts, unknown options, `ro`, `compress-force`, `subvol*` and `device*` are rejected.
 - `--ip-mode auto|dhcp|static` Select the target IPv4 mode. `auto` keeps the existing automatic choice; `static` reuses the collected address and gateway.
 - `--dns-mode auto|dhcp|static` Select the target DNS mode. `auto` keeps existing behavior; with a static IP and `dhcp`, DNS servers learned during installation are saved. Debian-family installers also use `static` DNS before fetching the remote preseed.
 - `--dns-servers IP[,IP...]` Set static DNS servers using IPv4 and/or IPv6 addresses; requires `--dns-mode static`.
@@ -184,6 +188,23 @@ bash reinstall.sh anolis      7|8|23
 - `--no-cloud-kernel` Avoid using cloud kernel to prevent black or glitch screens on certain machines; applicable to Debian, Ubuntu, Alpine and openSUSE.
 - `--hold 1` Reboot only into install environment, without running installer, only for SSH connect to test network connection.
 - `--hold 2` Prevent reboot after installation completes, allowing SSH login to modify system content; the system is mounted at `/target` for Debian/Kali and `/os` for other distros.
+
+#### Btrfs root support
+
+Support is tied to the installation path, release and target kernel. Compression, level and mount-option checks run before partitioning; unsupported settings fail without an automatic fallback.
+
+| Installation path | Btrfs root targets | Limits |
+| --- | --- | --- |
+| Direct install | Arch, Gentoo, AOSC, NixOS 26.05, Alpine 3.21–3.24 | AOSC uses this repository's custom path; [AOSC LiveKit upstream has warned against installing the system on Btrfs](https://wiki.aosc.io/developer/minutes/20230624/). |
+| Debian Installer | Debian 10–13, Kali rolling / last-snapshot | Debian 9 is not supported by this Btrfs path. |
+| Fedora installer / cloud image | Fedora 43–44 | The AlmaLinux Kickstart path does not support Btrfs. |
+| Cloud image conversion | openSUSE Leap 16.0 / Tumbleweed, Ubuntu 18.04–26.04, Oracle Linux 8–10, AlmaLinux 10.2+ | Oracle Linux requires UEK. Ubuntu uses the project's manual integration path; Subiquity ISO installs are not supported. openSUSE is limited to the official UEFI QEMU cloud images. |
+
+Having a Btrfs driver alone does not qualify a system for this list. Generic custom `redhat` images, CentOS, Rocky, AlmaLinux 8/9, Anolis, OpenCloudOS, openEuler, FNOS and FygoOS are not supported Btrfs-root targets.
+
+Target kernel baselines are checked conservatively by distro, release and kernel variant. zstd/zlib compression requires kernel 4.14 or newer; zlib levels 1–9 require 4.14 or newer; positive zstd levels 1–15 require 5.1 or newer; negative zstd levels -1…-15 require 6.15 or newer. Custom `discard=async` requires 5.6. The running installer kernel is not used as a proxy for the target kernel; removed or unverified legacy mount options are rejected. See the [Btrfs compression documentation](https://btrfs.readthedocs.io/en/latest/Compression.html).
+
+The default subvolumes are `@` (`/`) and `@boot` (`/boot`). Subvolume mounts on the same Btrfs filesystem share compression options, so `@boot` receives `chattr +m` while empty, before boot files are written; new files inherit the no-compression flag. `compress-force` is always rejected because it overrides this exclusion. See [Btrfs mount options and file attributes](https://btrfs.readthedocs.io/en/latest/btrfs-man5.html#mount-options).
 
 > [!TIP]
 >

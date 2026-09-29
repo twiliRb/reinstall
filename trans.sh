@@ -15,6 +15,13 @@ SCRIPT_VERSION=98FEEC8E-6B0F-4B27-B44C-6CB717809E47
 TRUE=0
 FALSE=1
 EFI_UUID=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+btrfs_almalinux_image_verified=false
+btrfs_almalinux_image_version=
+btrfs_almalinux_cached_qcow=
+btrfs_almalinux_image_size=
+btrfs_almalinux_nbd_attached=false
+btrfs_almalinux_preflight_mount_active=false
+btrfs_almalinux_preflight_mount_dir=
 
 error() {
     color='\e[31m'
@@ -46,6 +53,35 @@ warn() {
 
 error_and_exit() {
     error "$@"
+
+    # The AlmaLinux preflight owns this NBD device only while its internal
+    # state flag is set. Clean it on unexpected ERR paths as well as explicit
+    # preflight failures.
+    if [ "${btrfs_almalinux_preflight_mount_active:-false}" = true ] &&
+        [ -n "${btrfs_almalinux_preflight_mount_dir:-}" ]; then
+        umount "$btrfs_almalinux_preflight_mount_dir" 2>/dev/null || true
+        if ! awk -v target="$btrfs_almalinux_preflight_mount_dir" '$2 == target { found = 1 } END { exit !found }' /proc/mounts; then
+            btrfs_almalinux_preflight_mount_active=false
+        fi
+    fi
+    if [ "${btrfs_almalinux_nbd_attached:-false}" = true ]; then
+        partx -d /dev/nbd0 >/dev/null 2>&1 || true
+        if ! qemu-nbd --disconnect /dev/nbd0; then
+            sleep 1
+            qemu-nbd --disconnect /dev/nbd0 || true
+        fi
+        [ -e /sys/block/nbd0/pid ] || btrfs_almalinux_nbd_attached=false
+    fi
+
+    # AlmaLinux's pre-partition version check caches the exact verified qcow2
+    # in tmpfs. Release that memory if any later installation step aborts.
+    case "${btrfs_almalinux_cached_qcow:-}" in
+    /tmp/reinstall-almalinux-btrfs.*)
+        rm -f "$btrfs_almalinux_cached_qcow"
+        btrfs_almalinux_cached_qcow=
+        btrfs_almalinux_image_verified=false
+        ;;
+    esac
 
     if is_have_cmd sudo; then
         sudo_='sudo '
@@ -97,6 +133,15 @@ if ! [ -r "$btrfs_layout_helper" ]; then
 fi
 . "$btrfs_layout_helper"
 
+grub_hook_helper=/reinstall-grub-hook.sh
+if ! [ -r "$grub_hook_helper" ]; then
+    grub_hook_helper="$(dirname "$0")/lib/reinstall-grub-hook.sh"
+fi
+if ! [ -r "$grub_hook_helper" ]; then
+    error_and_exit "Missing pinned GRUB update hook helper."
+fi
+. "$grub_hook_helper"
+
 windows_helper=/windows-serialize.sh
 if ! [ -r "$windows_helper" ]; then
     windows_helper="$(dirname "$0")/lib/windows-serialize.sh"
@@ -114,6 +159,25 @@ if ! [ -r "$ssh_helper" ]; then
     error_and_exit "Missing pinned SSH key writer."
 fi
 . "$ssh_helper"
+
+setup_grub_update_hook_for_target() {
+    local target_root=$1
+    local profile by_id_disk
+
+    profile=$(reinstall_grub_hook_profile_for_os "$distro" "${releasever:-}") || return 0
+    if [ -z "$profile" ]; then
+        return 0
+    fi
+
+    if ! by_id_disk=$(reinstall_grub_hook_resolve_by_id_disk "/dev/$xda"); then
+        warn "No stable /dev/disk/by-id alias for /dev/$xda; skipping the GRUB MBR update hook."
+        return 0
+    fi
+
+    if ! reinstall_grub_hook_setup "$target_root" "$profile" "$by_id_disk"; then
+        error_and_exit "Failed to install the required GRUB MBR update hook for $distro $releasever."
+    fi
+}
 
 is_run_from_locald() {
     [[ "$0" = "/etc/local.d/*" ]]
@@ -549,6 +613,13 @@ get_all_disks() {
 
 extract_env_from_cmdline() {
     filesystem=ext4
+    btrfs_almalinux_image_verified=false
+    btrfs_almalinux_image_version=
+    btrfs_almalinux_cached_qcow=
+    btrfs_almalinux_image_size=
+    btrfs_almalinux_nbd_attached=false
+    btrfs_almalinux_preflight_mount_active=false
+    btrfs_almalinux_preflight_mount_dir=
     ip_mode=auto
     dns_mode=auto
     dns_servers=
@@ -571,28 +642,43 @@ extract_env_from_cmdline() {
         esac
     fi
 
-    if reinstall_validate_filesystem "$filesystem" "$distro"; then
+    if reinstall_validate_filesystem "$filesystem" "$distro" "$releasever"; then
         :
     else
         filesystem_status=$?
         case "$filesystem_status" in
         1) error_and_exit "Invalid filesystem in command-line configuration." ;;
-        2) error_and_exit "Btrfs is supported only for Arch, Gentoo, NixOS, and AOSC." ;;
+        2) error_and_exit "Btrfs is unsupported for $distro $releasever." ;;
         esac
     fi
 
     if [ "$filesystem" = btrfs ]; then
-        # e2fsprogs-extra provides full chattr/lsattr with Btrfs +m support;
-        # BusyBox's applets lack that attribute.
-        # shellcheck disable=SC2046
-        apk add $(reinstall_btrfs_preflight_packages)
-        reinstall_btrfs_activate_kernel_support
-        e2fsprogs_version=$(reinstall_e2fsprogs_version_from_mke2fs_output "$(mke2fs -V 2>&1)")
-        if ! reinstall_e2fsprogs_supports_nocompress "$e2fsprogs_version"; then
-            error_and_exit "Btrfs /boot compression exclusion requires e2fsprogs 1.46.2 or newer."
+        target_kernel_variant=$(reinstall_btrfs_default_kernel_variant "$distro" "$releasever") ||
+            error_and_exit "No Btrfs-capable target kernel route is defined for $distro $releasever."
+        btrfs_compression=${btrfs_compression:-zstd}
+        btrfs_compression_level=${btrfs_compression_level:-}
+        btrfs_options=${btrfs_options:-}
+        btrfs_options_override=${btrfs_options_override:-false}
+        if btrfs_root_options=$(reinstall_btrfs_validate_mount_options \
+            "$distro" "$releasever" "$target_kernel_variant" \
+            "$btrfs_compression" "$btrfs_compression_level" \
+            "$btrfs_options" "$btrfs_options_override"); then
+            echo "CHECKPOINT btrfs/options-preflight: distro=$distro release=$releasever kernel=$target_kernel_variant options=${btrfs_root_options:-none}"
+        else
+            btrfs_options_status=$?
+            case "$btrfs_options_status" in
+            1) error_and_exit "Invalid or conflicting Btrfs compression/options configuration." ;;
+            2) error_and_exit "The selected Btrfs compression/options are unsupported by the target kernel route for $distro $releasever ($target_kernel_variant). Choose explicit compatible options." ;;
+            *) error_and_exit "Could not validate the Btrfs target configuration." ;;
+            esac
         fi
-        check_btrfs_nocompress_support ||
-            error_and_exit "The running kernel or btrfs-progs cannot set and inherit the Btrfs no-compression attribute."
+
+        if reinstall_btrfs_almalinux_cloud_preflight_pending; then
+            echo "CHECKPOINT btrfs/mode-preflight: AlmaLinux cloud image identity will be checked before partitioning"
+        else
+            reinstall_btrfs_require_trans_mode
+        fi
+        reinstall_btrfs_preflight_runtime_support
     fi
 
     # 如果空白则设置默认值
@@ -2254,6 +2340,29 @@ EOF
     # efi grub 添加 fwsetup 条目
     chroot /os update-grub
 
+    if [ "$filesystem" = btrfs ]; then
+        chroot /os apk add btrfs-progs
+        alpine_mkinitfs_conf=/os/etc/mkinitfs/mkinitfs.conf
+        if [ -f "$alpine_mkinitfs_conf" ]; then
+            if grep -q '^features="' "$alpine_mkinitfs_conf"; then
+                if ! grep -Eq '^features="[^"]*([[:space:]]|^)btrfs([[:space:]]|\")' "$alpine_mkinitfs_conf"; then
+                    sed -i '/^features="/s/^features="/features="btrfs /' "$alpine_mkinitfs_conf"
+                fi
+            else
+                printf '\nfeatures="btrfs"\n' >>"$alpine_mkinitfs_conf"
+            fi
+        else
+            mkdir -p "$(dirname "$alpine_mkinitfs_conf")"
+            printf 'features="btrfs"\n' >"$alpine_mkinitfs_conf"
+        fi
+        write_btrfs_fstab_for_target /os ||
+            error_and_exit "Could not write Alpine Btrfs mount entries to fstab."
+        append_btrfs_grub_cmdline /os ||
+            error_and_exit "Could not add Btrfs rootflags to Alpine GRUB configuration."
+        chroot /os mkinitfs -k "$(basename /os/lib/modules/*-*)"
+        chroot /os update-grub
+    fi
+
     # 是否保留 swap
     if [ -e /os/swapfile ]; then
         if false; then
@@ -2968,6 +3077,10 @@ EOF
         # bsdtar: bsdtar: Failed to set default locale
         # Failed to set default locale
         set_locale
+        if [ "$filesystem" = btrfs ]; then
+            ensure_mkinitcpio_btrfs_module "$os_dir" ||
+                error_and_exit "Could not enable the Btrfs module in Arch mkinitcpio."
+        fi
         if [ "$(uname -m)" = aarch64 ]; then
             chroot $os_dir pacman-key --lsign-key builder@archlinuxarm.org
         fi
@@ -2979,6 +3092,9 @@ EOF
 
         # arm 的内核有多种选择，默认是 linux-aarch64，所以要添加 --noconfirm
         chroot $os_dir pacman -Syu --noconfirm linux
+        if [ "$filesystem" = btrfs ]; then
+            chroot "$os_dir" mkinitcpio -P
+        fi
     }
 
     # shellcheck disable=SC2317
@@ -3140,7 +3256,11 @@ EOF
         # 要注意 root=UUID=xxxx 头尾有空格
         # https://wiki.gentoo.org/wiki/Installkernel#Install_chroot_check
         # https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Kernel#Chroot_detection
-        uuid=$(chroot $os_dir findmnt -rno UUID /)
+        if [ "$filesystem" = btrfs ]; then
+            uuid=$(blkid -s UUID -o value "$btrfs_device")
+        else
+            uuid=$(chroot $os_dir findmnt -rno UUID /)
+        fi
         mkdir -p $os_dir/etc/dracut.conf.d
         if [ "$filesystem" = btrfs ]; then
             gentoo_rootflags=$(reinstall_btrfs_kernel_rootflags \
@@ -3277,6 +3397,7 @@ EOF
         chroot $os_dir grub-install --efi-directory=/efi --removable
     else
         chroot $os_dir grub-install /dev/$xda
+        setup_grub_update_hook_for_target "$os_dir"
     fi
 
     # cmdline + 生成 grub.cfg
@@ -3520,18 +3641,448 @@ get_btrfs_layout_plan() {
         boot_mode=bios
     fi
     disk_size=$(get_disk_size "/dev/$xda")
-    reinstall_btrfs_layout_plan "$boot_mode" "$disk_size"
+    reinstall_btrfs_layout_plan "$boot_mode" "$disk_size" "${btrfs_root_options:-}"
+}
+
+# Keep Btrfs enabled only when the selected trans.sh path configures and boots
+# the target root on the shared Btrfs layout. ISO installer paths are admitted
+# separately after their storage configuration hooks are wired.
+reinstall_btrfs_install_mode() {
+    if is_use_cloud_image; then
+        case "${img_type:-}" in
+        qemu) printf 'cloud-qemu\n' ;;
+        raw) printf 'cloud-raw\n' ;;
+        *) printf 'cloud-unsupported\n' ;;
+        esac
+    else
+        case "$distro" in
+        alpine | arch | gentoo | aosc | nixos) printf 'direct\n' ;;
+        debian | kali) printf 'debian-installer\n' ;;
+        fedora | almalinux | ubuntu) printf 'installer\n' ;;
+        oracle | opensuse) printf 'cloud-required\n' ;;
+        *) printf 'unsupported\n' ;;
+        esac
+    fi
+}
+
+reinstall_btrfs_preflight_runtime_support() {
+    if [ "$(reinstall_btrfs_install_mode)" = debian-installer ]; then
+        # D-I uses a Debian initrd, not the Alpine modloop and BusyBox tools.
+        # Target option capability was checked above; its adapter owns the
+        # target-side +m capability check before partman starts.
+        echo "CHECKPOINT btrfs/runtime-preflight: mode=debian-installer alpine-probes=skipped"
+        return 0
+    fi
+
+    # e2fsprogs-extra provides full chattr/lsattr with Btrfs +m support;
+    # BusyBox's applets lack that attribute.
+    # shellcheck disable=SC2046
+    apk add $(reinstall_btrfs_preflight_packages)
+    reinstall_btrfs_activate_kernel_support
+    e2fsprogs_version=$(reinstall_e2fsprogs_version_from_mke2fs_output "$(mke2fs -V 2>&1)")
+    if ! reinstall_e2fsprogs_supports_nocompress "$e2fsprogs_version"; then
+        error_and_exit "Btrfs /boot compression exclusion requires e2fsprogs 1.46.2 or newer."
+    fi
+    check_btrfs_nocompress_support ||
+        error_and_exit "The running kernel or btrfs-progs cannot set and inherit the Btrfs no-compression attribute."
+}
+
+reinstall_btrfs_opensuse_cloud_image_supported() {
+    [ "$distro" = opensuse ] || return 1
+    [ -z "${img_type_warp:-}" ] || return 1
+    case "${basearch:-}" in x86_64 | aarch64) ;; *) return 1 ;; esac
+
+    local image_url=$img
+    local image_name expected_url mirror image_dir
+    case "$releasever" in
+    16.0)
+        image_name="Leap-16.0-Minimal-VM.${basearch}-Cloud.qcow2"
+        for mirror in mirror.nju.edu.cn/opensuse downloadcontentcdn.opensuse.org download.opensuse.org; do
+            expected_url="https://$mirror/distribution/leap/16.0/appliances/$image_name"
+            [ "$image_url" = "$expected_url" ] && return 0
+        done
+        ;;
+    tumbleweed)
+        image_name="openSUSE-Tumbleweed-Minimal-VM.${basearch}-Cloud.qcow2"
+        image_dir=tumbleweed/appliances
+        [ "$basearch" = aarch64 ] && image_dir=ports/aarch64/tumbleweed/appliances
+        for mirror in mirror.nju.edu.cn/opensuse downloadcontentcdn.opensuse.org download.opensuse.org; do
+            expected_url="https://$mirror/$image_dir/$image_name"
+            [ "$image_url" = "$expected_url" ] && return 0
+        done
+        ;;
+    *) return 1 ;;
+    esac
+    return 1
+}
+
+# AlmaLinux 10 cloud image selectors can track a newer minor release over time.
+# Do not infer the Btrfs support floor from the CLI selector or image URL; inspect
+# the downloaded image's actual os-release/CPE before allowing create_part.
+reinstall_btrfs_almalinux_cloud_preflight_pending() {
+    [ "${filesystem:-ext4}" = btrfs ] || return 1
+    [ "${distro:-}" = almalinux ] || return 1
+    [ "$(reinstall_btrfs_install_mode)" = cloud-qemu ]
+}
+
+reinstall_btrfs_almalinux_release_supported() {
+    [ "$#" -eq 1 ] || return 1
+    printf '%s\n' "$1" | awk -F. '
+        NF == 2 && $1 == 10 && $2 ~ /^[0-9]+$/ && $2 >= 2 { ok = 1 }
+        END { exit !ok }
+    '
+}
+
+reinstall_btrfs_almalinux_cpe_version() {
+    [ "$#" -eq 1 ] || return 1
+    printf '%s\n' "$1" | awk -F: '
+        tolower($1) != "cpe" { exit }
+        $2 == "/o" && tolower($3) == "almalinux" && tolower($4) == "almalinux" { print $5; exit }
+        $2 == "2.3" && $3 == "o" && tolower($4) == "almalinux" && tolower($5) == "almalinux" { print $6; exit }
+    '
+}
+
+# Parse data files without sourcing them: the target image is untrusted input.
+reinstall_btrfs_almalinux_image_version() {
+    [ "$#" -eq 1 ] || return 1
+    local os_release=$1 image_id image_version cpe_name cpe_version effective_version
+    [ -r "$os_release" ] || return 1
+    image_id=$(awk -F= '$1 == "ID" { print substr($0, index($0, "=") + 1); exit }' "$os_release" |
+        tr -d "\"'" | tr '[:upper:]' '[:lower:]')
+    image_version=$(awk -F= '$1 == "VERSION_ID" { print substr($0, index($0, "=") + 1); exit }' "$os_release" |
+        tr -d "\"'[:space:]" )
+    cpe_name=$(awk -F= '$1 == "CPE_NAME" { print substr($0, index($0, "=") + 1); exit }' "$os_release" |
+        tr -d "\"'[:space:]")
+
+    if [ -n "$image_id" ] && [ "$image_id" != almalinux ]; then
+        return 1
+    fi
+    cpe_version=
+    if [ -n "$cpe_name" ]; then
+        cpe_version=$(reinstall_btrfs_almalinux_cpe_version "$cpe_name") || return 1
+        [ -n "$cpe_version" ] || return 1
+        case "$cpe_version" in
+        10) ;;
+        *) reinstall_btrfs_almalinux_release_supported "$cpe_version" || return 1 ;;
+        esac
+    fi
+
+    case "$image_version" in
+    10)
+        [ -n "$cpe_version" ] || return 1
+        effective_version=$cpe_version
+        ;;
+    10.*)
+        reinstall_btrfs_almalinux_release_supported "$image_version" || return 1
+        if [ -n "$cpe_version" ] && [ "$cpe_version" != 10 ] && [ "$cpe_version" != "$image_version" ]; then
+            return 1
+        fi
+        effective_version=$image_version
+        ;;
+    '')
+        [ -n "$cpe_version" ] || return 1
+        effective_version=$cpe_version
+        ;;
+    *) return 1 ;;
+    esac
+
+    [ "$image_id" = almalinux ] || [ -n "$cpe_version" ] || return 1
+    reinstall_btrfs_almalinux_release_supported "$effective_version" || return 1
+    printf '%s\n' "$effective_version"
+}
+
+reinstall_btrfs_almalinux_cloud_image_url_supported() {
+    [ "$(reinstall_btrfs_install_mode)" = cloud-qemu ] || return 1
+    [ -z "${img_type_warp:-}" ] || return 1
+    local image_arch expected_url
+    local image_arches=
+    case "${basearch:-}" in
+    x86_64)
+        case "${elarch:-}" in
+        x86_64 | x86_64_v2) image_arches=$elarch ;;
+        '') image_arches='x86_64 x86_64_v2' ;;
+        *) return 1 ;;
+        esac
+        ;;
+    aarch64)
+        [ -z "${elarch:-}" ] || [ "$elarch" = aarch64 ] || return 1
+        image_arches=aarch64
+        ;;
+    *) return 1 ;;
+    esac
+    case "${releasever:-10}" in 10 | 10.*) ;; *) return 1 ;; esac
+
+    for image_arch in $image_arches; do
+        for expected_url in \
+            "https://repo.almalinux.org/almalinux/${releasever:-10}/cloud/$image_arch/images/AlmaLinux-${releasever:-10}-GenericCloud-latest.$image_arch.qcow2" \
+            "https://mirror.nju.edu.cn/almalinux/${releasever:-10}/cloud/$image_arch/images/AlmaLinux-${releasever:-10}-GenericCloud-latest.$image_arch.qcow2"; do
+            [ "${img:-}" = "$expected_url" ] && return 0
+        done
+    done
+    return 1
+}
+
+reinstall_btrfs_almalinux_selector_matches_image() {
+    local requested=${releasever:-10} actual=${btrfs_almalinux_image_version:-}
+    [ -n "$actual" ] || return 1
+    case "$requested" in
+    10) return 0 ;;
+    10.*) [ "$requested" = "$actual" ] ;;
+    *) return 1 ;;
+    esac
+}
+
+reinstall_btrfs_almalinux_preflight_cleanup() {
+    [ "$#" -eq 5 ] || return 1
+    local qcow_file=$1 mount_dir=$2 attached=$3 mounted=$4 keep_qcow=$5 cleanup_status=0
+    if [ "$mounted" = true ]; then
+        if umount "$mount_dir"; then
+            btrfs_almalinux_preflight_mount_active=false
+        else
+            cleanup_status=1
+        fi
+    fi
+    if [ "$attached" = true ]; then
+        partx -d /dev/nbd0 >/dev/null 2>&1 || true
+        if ! qemu-nbd --disconnect /dev/nbd0; then
+            sleep 1
+            if ! qemu-nbd --disconnect /dev/nbd0 && [ -e /sys/block/nbd0/pid ]; then
+                cleanup_status=1
+            fi
+        fi
+        if [ -e /sys/block/nbd0/pid ]; then
+            btrfs_almalinux_nbd_attached=true
+        else
+            btrfs_almalinux_nbd_attached=false
+        fi
+    fi
+    if awk -v target="$mount_dir" '$2 == target { found = 1 } END { exit !found }' /proc/mounts; then
+        cleanup_status=1
+    else
+        btrfs_almalinux_preflight_mount_active=false
+        btrfs_almalinux_preflight_mount_dir=
+        rm -rf "$mount_dir"
+    fi
+    if [ "$keep_qcow" != true ] && ! [ -e /sys/block/nbd0/pid ]; then
+        rm -f "$qcow_file"
+    fi
+    return "$cleanup_status"
+}
+
+reinstall_btrfs_preflight_almalinux_cloud_image() {
+    reinstall_btrfs_almalinux_cloud_preflight_pending || return 0
+    reinstall_btrfs_almalinux_cloud_image_url_supported ||
+        error_and_exit "Btrfs AlmaLinux cloud mode requires an uncompressed official GenericCloud qcow2 image URL."
+    [ -e /sys/block/nbd0/pid ] &&
+        error_and_exit "Btrfs AlmaLinux image preflight requires /dev/nbd0 to be unused."
+
+    apk add qemu-img util-linux wget
+    local image_size available_kb available_mem_kb required_kb qcow_file mount_dir
+    local nbd_max_part
+    local attached=false mounted=false image_release= device fstype mount_opts
+    image_size=$(get_http_file_size "$img") ||
+        error_and_exit "Could not determine the AlmaLinux cloud image size before Btrfs preflight."
+    case "$image_size" in '' | *[!0-9]*) error_and_exit "Invalid AlmaLinux cloud image Content-Length." ;; esac
+    available_kb=$(df -Pk /tmp | awk 'NR == 2 { print $4 }')
+    available_mem_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)
+    case "$available_kb:$available_mem_kb" in
+    *[!0-9:]* | :* | *:) error_and_exit "Could not determine safe /tmp and memory capacity for AlmaLinux image preflight." ;;
+    esac
+    required_kb=$(((image_size + 1023) / 1024 + 262144))
+    if [ "$available_kb" -lt "$required_kb" ] || [ "$available_mem_kb" -lt "$required_kb" ]; then
+        error_and_exit "Insufficient /tmp or available memory to cache the AlmaLinux qcow2 for pre-partition identity verification."
+    fi
+
+    qcow_file=$(mktemp /tmp/reinstall-almalinux-btrfs.XXXXXX) ||
+        error_and_exit "Could not create a temporary AlmaLinux qcow2 cache."
+    btrfs_almalinux_cached_qcow=$qcow_file
+    mount_dir=$(mktemp -d /tmp/reinstall-almalinux-inspect.XXXXXX) || {
+        rm -f "$qcow_file"
+        btrfs_almalinux_cached_qcow=
+        error_and_exit "Could not create an AlmaLinux image inspection mountpoint."
+    }
+    btrfs_almalinux_preflight_mount_dir=$mount_dir
+    if ! wget -T 30 -t 5 -O "$qcow_file" "$img"; then
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        error_and_exit "Could not download the AlmaLinux qcow2 for pre-partition identity verification."
+    fi
+    if ! qemu-img info --output=json "$qcow_file" 2>/dev/null |
+        grep -Eq '"format"[[:space:]]*:[[:space:]]*"qcow2"'; then
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        error_and_exit "The selected AlmaLinux cloud image is not a qcow2 image."
+    fi
+    if ! modprobe nbd nbds_max=1 max_part=16; then
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        error_and_exit "Could not attach the AlmaLinux qcow2 read-only for pre-partition identity verification."
+    fi
+    nbd_max_part=$(cat /sys/module/nbd/parameters/max_part 2>/dev/null || printf '0')
+    case "$nbd_max_part" in '' | *[!0-9]*) nbd_max_part=0 ;; esac
+    if [ "$nbd_max_part" -lt 1 ]; then
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        error_and_exit "The loaded NBD module cannot expose qcow2 partitions for AlmaLinux identity verification."
+    fi
+    if ! qemu-nbd --read-only --connect=/dev/nbd0 "$qcow_file"; then
+        [ -e /sys/block/nbd0/pid ] && attached=true
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        error_and_exit "Could not attach the AlmaLinux qcow2 read-only for pre-partition identity verification."
+    fi
+    attached=true
+    btrfs_almalinux_nbd_attached=true
+    partx -a /dev/nbd0 || true
+    mdev -s || true
+    sleep 1
+
+    for device in /dev/nbd0 /dev/nbd0p*; do
+        [ -b "$device" ] || continue
+        fstype=$(blkid -s TYPE -o value "$device" 2>/dev/null || true)
+        case "$fstype" in
+        ext2 | ext3 | ext4) mount_opts=ro,noload ;;
+        xfs) mount_opts=ro,norecovery ;;
+        # Btrfs can replay its tree log even under a read-only mount; the NBD
+        # device is read-only, so explicitly suppress replay during inspection.
+        btrfs) mount_opts=ro,nologreplay ;;
+        *) continue ;;
+        esac
+        if ! mount -o "$mount_opts" "$device" "$mount_dir" 2>/dev/null; then
+            continue
+        fi
+        mounted=true
+        btrfs_almalinux_preflight_mount_active=true
+        if [ -f "$mount_dir/etc/os-release" ]; then
+            image_release=$(reinstall_btrfs_almalinux_image_version "$mount_dir/etc/os-release") || image_release=
+        elif [ -f "$mount_dir/usr/lib/os-release" ]; then
+            image_release=$(reinstall_btrfs_almalinux_image_version "$mount_dir/usr/lib/os-release") || image_release=
+        fi
+        umount "$mount_dir" || {
+            reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+            error_and_exit "Could not unmount the AlmaLinux image after identity inspection."
+        }
+        mounted=false
+        btrfs_almalinux_preflight_mount_active=false
+        [ -n "$image_release" ] && break
+    done
+
+    if [ -z "$image_release" ]; then
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        error_and_exit "The selected image does not prove an AlmaLinux 10.2-or-newer root filesystem."
+    fi
+    btrfs_almalinux_image_version=$image_release
+    if ! reinstall_btrfs_almalinux_selector_matches_image; then
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        btrfs_almalinux_image_version=
+        error_and_exit "The selected AlmaLinux qcow2 version does not match the requested release selector."
+    fi
+    if ! reinstall_btrfs_validate_mount_options \
+        almalinux "$image_release" default \
+        "${btrfs_compression:-zstd}" "${btrfs_compression_level:-}" \
+        "${btrfs_options:-}" "${btrfs_options_override:-false}" >/dev/null; then
+        reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" false || true
+        btrfs_almalinux_image_version=
+        error_and_exit "The selected Btrfs options are unsupported by the inspected AlmaLinux $image_release kernel baseline."
+    fi
+    if ! reinstall_btrfs_almalinux_preflight_cleanup "$qcow_file" "$mount_dir" "$attached" "$mounted" true; then
+        rm -f "$qcow_file"
+        btrfs_almalinux_image_version=
+        error_and_exit "Could not detach the inspected AlmaLinux qcow2 cleanly."
+    fi
+
+    btrfs_almalinux_cached_qcow=$qcow_file
+    btrfs_almalinux_image_size=$image_size
+    btrfs_almalinux_image_verified=true
+    echo "CHECKPOINT btrfs/almalinux-image-preflight: verified=AlmaLinux-$image_release cache=reused before-partitioning=true"
+}
+
+reinstall_btrfs_reuse_almalinux_preflight_qcow() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${btrfs_almalinux_image_verified:-false}" = true ] || return 1
+    [ -n "${btrfs_almalinux_cached_qcow:-}" ] && [ -f "$btrfs_almalinux_cached_qcow" ] || return 1
+    mv "$btrfs_almalinux_cached_qcow" "$1" || return 1
+    btrfs_almalinux_cached_qcow=
+    echo "CHECKPOINT btrfs/almalinux-image-cache: reused=true destination=$1"
+}
+
+reinstall_btrfs_trans_mode_supported() {
+    [ "$filesystem" = btrfs ] || return 1
+    case "$distro:$(reinstall_btrfs_install_mode)" in
+    alpine:direct | arch:direct | gentoo:direct | aosc:direct | nixos:direct)
+        return 0
+        ;;
+    fedora:cloud-qemu | fedora:installer)
+        case "$releasever" in 43 | 44) return 0 ;; esac
+        return 1
+        ;;
+    debian:debian-installer)
+        case "$releasever" in 10 | 11 | 12 | 13) return 0 ;; esac
+        return 1
+        ;;
+    kali:debian-installer)
+        case "$releasever" in rolling | last-snapshot) return 0 ;; esac
+        return 1
+        ;;
+    oracle:cloud-qemu)
+        case "$releasever" in 8 | 9 | 10) ;; *) return 1 ;; esac
+        [ "${target_kernel_variant:-}" = uek ]
+        ;;
+    ubuntu:cloud-qemu)
+        case "$releasever" in
+        18.04 | 20.04 | 22.04 | 24.04 | 26.04) return 0 ;;
+        esac
+        return 1
+        ;;
+    opensuse:cloud-qemu)
+        [ "$releasever" = 16.0 ] || [ "$releasever" = tumbleweed ] || return 1
+        is_efi || return 1
+        reinstall_btrfs_opensuse_cloud_image_supported
+        ;;
+    almalinux:cloud-qemu)
+        [ "${btrfs_almalinux_image_verified:-false}" = true ] || return 1
+        reinstall_btrfs_almalinux_cloud_image_url_supported || return 1
+        reinstall_btrfs_almalinux_selector_matches_image || return 1
+        reinstall_btrfs_validate_mount_options \
+            almalinux "$btrfs_almalinux_image_version" default \
+            "${btrfs_compression:-zstd}" "${btrfs_compression_level:-}" \
+            "${btrfs_options:-}" "${btrfs_options_override:-false}" >/dev/null
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+reinstall_btrfs_uses_trans_root_layout() {
+    [ "$filesystem" = btrfs ] || return 1
+    case "$distro:$(reinstall_btrfs_install_mode)" in
+    alpine:direct | arch:direct | gentoo:direct | aosc:direct | nixos:direct | \
+        fedora:cloud-qemu | oracle:cloud-qemu | ubuntu:cloud-qemu | almalinux:cloud-qemu)
+        reinstall_btrfs_trans_mode_supported
+        ;;
+    opensuse:cloud-qemu)
+        reinstall_btrfs_trans_mode_supported
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+reinstall_btrfs_require_trans_mode() {
+    [ "$filesystem" = btrfs ] || return 0
+    reinstall_btrfs_trans_mode_supported ||
+        error_and_exit "Btrfs root installation is not wired for $distro $releasever mode $(reinstall_btrfs_install_mode); refusing to partition the target."
 }
 
 create_part() {
     local btrfs_layout_plan=
+    local btrfs_cloud_copy=false
 
     # 除了 dd 都会用到
     info "Create Part"
 
     if [ "$filesystem" = btrfs ]; then
-        btrfs_layout_plan=$(get_btrfs_layout_plan) ||
-            error_and_exit "Could not calculate the Btrfs partition layout."
+        reinstall_btrfs_require_trans_mode
+        if reinstall_btrfs_uses_trans_root_layout; then
+            btrfs_layout_plan=$(get_btrfs_layout_plan) ||
+                error_and_exit "Could not calculate the Btrfs partition layout."
+            if is_use_cloud_image; then
+                btrfs_cloud_copy=true
+            fi
+        fi
     fi
 
     # 分区工具
@@ -3682,6 +4233,95 @@ create_part() {
             echo                                    #1 官方安装有这个分区
             mkfs.ext4 -F $ext4_opts "/dev/$(xda 2)" #2 os + installer
         fi
+    elif reinstall_btrfs_uses_trans_root_layout; then
+        local installer_part_size=
+        btrfs_installer_part_num=
+        if $btrfs_cloud_copy; then
+            installer_part_size=$(get_cloud_image_part_size)
+            [ -n "$installer_part_size" ] ||
+                error_and_exit "Could not determine the Btrfs cloud-copy scratch partition size."
+        fi
+
+        local plan_record plan_number plan_role plan_fs plan_start plan_end plan_flag
+        local btrfs_table root_part_num efi_part_num root_subvolume boot_subvolume
+        local root_compression boot_policy root_device btrfs_top_level root_subvolume_id
+        local btrfs_top_mount_options tab
+
+        btrfs_table=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "table" {print $2}')
+        root_part_num=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "root" {print $2}')
+        efi_part_num=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "esp" {print $2}')
+        root_subvolume=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $2}')
+        root_compression=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $4}')
+        boot_subvolume=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $2}')
+        boot_policy=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $4}')
+        if [ -z "$btrfs_table" ] || [ -z "$root_part_num" ] ||
+            [ -z "$root_subvolume" ] || [ -z "$boot_subvolume" ] ||
+            [ "$root_compression" != "${btrfs_root_options:-}" ] ||
+            [ "$boot_policy" != no-compression ] || { is_efi && [ -z "$efi_part_num" ]; }; then
+            error_and_exit "Invalid Btrfs layout plan."
+        fi
+
+        parted /dev/$xda -s -- mklabel "$btrfs_table"
+        tab=$(printf '\t')
+        while IFS="$tab" read -r plan_record plan_number plan_role plan_fs plan_start plan_end plan_flag; do
+            [ "$plan_record" = partition ] || continue
+            case "$plan_role" in
+            esp)
+                parted /dev/$xda -s -- mkpart '" "' fat32 "$plan_start" "$plan_end"
+                parted /dev/$xda -s -- set "$plan_number" esp on
+                efi_part_num=$plan_number
+                ;;
+            bios_grub)
+                parted /dev/$xda -s -- mkpart '" "' "$plan_start" "$plan_end"
+                parted /dev/$xda -s -- set "$plan_number" bios_grub on
+                ;;
+            root)
+                if $btrfs_cloud_copy; then
+                    plan_end="-$installer_part_size"
+                fi
+                if [ "$btrfs_table" = msdos ]; then
+                    parted /dev/$xda -s -- mkpart primary btrfs "$plan_start" "$plan_end"
+                    parted /dev/$xda -s -- set "$plan_number" boot on
+                else
+                    parted /dev/$xda -s -- mkpart '" "' btrfs "$plan_start" "$plan_end"
+                fi
+                root_part_num=$plan_number
+                ;;
+            *) error_and_exit "Unknown Btrfs partition role: $plan_role" ;;
+            esac
+        done <<EOF
+$btrfs_layout_plan
+EOF
+        if $btrfs_cloud_copy; then
+            btrfs_installer_part_num=$((root_part_num + 1))
+            parted /dev/$xda -s -- mkpart '" "' ext4 "-$installer_part_size" 100%
+        fi
+        update_part
+
+        if [ -n "$efi_part_num" ]; then
+            mkfs.fat -n efi "/dev/$(xda "$efi_part_num")"
+        fi
+        if $btrfs_cloud_copy; then
+            mkfs.ext4 -F -L installer "/dev/$(xda "$btrfs_installer_part_num")"
+        fi
+        root_device="/dev/$(xda "$root_part_num")"
+        mkfs.btrfs -f -L os "$root_device"
+
+        btrfs_top_level=$(mktemp -d /tmp/reinstall-btrfs-layout.XXXXXX) ||
+            error_and_exit "Could not create a temporary Btrfs mountpoint."
+        btrfs_top_mount_options=$(reinstall_btrfs_top_level_mount_options "${btrfs_root_options:-}") ||
+            error_and_exit "Could not construct the Btrfs top-level mount options."
+        mount -t btrfs -o "$btrfs_top_mount_options" "$root_device" "$btrfs_top_level"
+        btrfs subvolume create "$btrfs_top_level/$root_subvolume"
+        btrfs subvolume create "$btrfs_top_level/$boot_subvolume"
+        case "$boot_policy" in
+        no-compression) chattr +m "$btrfs_top_level/$boot_subvolume" ;;
+        *) error_and_exit "Unsupported Btrfs boot subvolume policy: $boot_policy" ;;
+        esac
+        root_subvolume_id=$(btrfs inspect-internal rootid "$btrfs_top_level/$root_subvolume")
+        btrfs subvolume set-default "$root_subvolume_id" "$btrfs_top_level"
+        umount "$btrfs_top_level"
+        rmdir "$btrfs_top_level"
     elif is_use_cloud_image; then
         installer_part_size="$(get_cloud_image_part_size)"
         # 这几个系统不使用dd，而是复制文件
@@ -3733,7 +4373,7 @@ create_part() {
         if [ "$filesystem" = btrfs ]; then
             local plan_record plan_number plan_role plan_fs plan_start plan_end plan_flag
             local btrfs_table root_part_num efi_part_num root_subvolume boot_subvolume
-            local root_compression boot_policy root_device btrfs_top_level root_subvolume_id
+            local root_compression boot_policy root_device btrfs_top_level root_subvolume_id btrfs_top_mount_options
             local tab
 
             btrfs_table=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "table" {print $2}')
@@ -3745,7 +4385,8 @@ create_part() {
             boot_policy=$(printf '%s\n' "$btrfs_layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $4}')
             if [ -z "$btrfs_table" ] || [ -z "$root_part_num" ] ||
                 [ -z "$root_subvolume" ] || [ -z "$boot_subvolume" ] ||
-                [ "$root_compression" != compress=zstd ] || [ "$boot_policy" != no-compression ]; then
+                [ "$root_compression" != "${btrfs_root_options:-}" ] ||
+                [ "$boot_policy" != no-compression ]; then
                 error_and_exit "Invalid Btrfs layout plan."
             fi
 
@@ -3787,7 +4428,9 @@ EOF
 
             btrfs_top_level=$(mktemp -d /tmp/reinstall-btrfs-layout.XXXXXX) ||
                 error_and_exit "Could not create a temporary Btrfs mountpoint."
-            mount -t btrfs -o "subvolid=5,$root_compression" "$root_device" "$btrfs_top_level"
+            btrfs_top_mount_options=$(reinstall_btrfs_top_level_mount_options "$root_compression") ||
+                error_and_exit "Could not construct the Btrfs top-level mount options."
+            mount -t btrfs -o "$btrfs_top_mount_options" "$root_device" "$btrfs_top_level"
             btrfs subvolume create "$btrfs_top_level/$root_subvolume"
             btrfs subvolume create "$btrfs_top_level/$boot_subvolume"
             case "$boot_policy" in
@@ -4725,7 +5368,8 @@ modify_linux() {
         mount_point=$1
         mount_dev=$(awk "\$2==\"$mount_point\" {print \$1}" $os_dir/etc/fstab)
         mount_opts=$(awk "\$2==\"$mount_point\" {print \$4}" $os_dir/etc/fstab)
-        if [ -n "$mount_dev" ]; then
+        if [ -n "$mount_dev" ] &&
+            ! awk -v target="$os_dir$mount_point" '$2 == target { found = 1 } END { exit !found }' /proc/mounts; then
             mount -o "$mount_opts" "$mount_dev" "$os_dir$mount_point"
         fi
     }
@@ -4807,6 +5451,12 @@ EOF
         if fw_pkgs=$(get_ucode_firmware_pkgs) && [ -n "$fw_pkgs" ]; then
             is_have_cmd_on_disk $os_dir dnf && mgr=dnf || mgr=yum
             chroot $os_dir $mgr install -y $fw_pkgs
+        fi
+
+        # Fedora BIOS cloud images already contain GRUB in the MBR. Keep it
+        # synchronized whenever package transactions update the GRUB packages.
+        if [ "$distro" = fedora ] && ! is_efi; then
+            setup_grub_update_hook_for_target "$os_dir"
         fi
 
         if [ "${network_backend:-auto}" = auto ]; then
@@ -5748,6 +6398,11 @@ download_qcow() {
     mount /dev/disk/by-label/installer /installer
 
     qcow_file=/installer/cloud_image.qcow2
+    if [ "${btrfs_almalinux_image_verified:-false}" = true ]; then
+        reinstall_btrfs_reuse_almalinux_preflight_qcow "$qcow_file" ||
+            error_and_exit "Could not reuse the verified AlmaLinux qcow2 cache."
+        return 0
+    fi
     if [ -n "$img_type_warp" ]; then
         # 边下载边解压，单线程下载
         # 用官方 wget ，带进度条
@@ -5771,6 +6426,39 @@ connect_qcow() {
     done
 }
 
+# Mount a source-image partition for inspection or copying. XFS needs nouuid
+# when its UUID is also present on the destination; Btrfs source images stay
+# read-only and suppress tree-log replay even for a read-only mount.
+mount_nouuid() {
+    local part_fstype= arg mount_options=
+    for arg in "$@"; do
+        case "$arg" in
+        /dev/*)
+            part_fstype=$(lsblk -no FSTYPE "$arg")
+            break
+            ;;
+        esac
+    done
+
+    case "$part_fstype" in
+    xfs) mount -o nouuid "$@" ;;
+    btrfs)
+        if [ "$1" = -o ]; then
+            mount_options=$2
+            shift 2
+        fi
+        case ",$mount_options," in *,rw,*) return 1 ;; esac
+        case ",$mount_options," in *,ro,*) ;; *) mount_options=${mount_options:+$mount_options,}ro ;; esac
+        case ",$mount_options," in
+        *,nologreplay,*) ;;
+        *) mount_options=$mount_options,nologreplay ;;
+        esac
+        mount -o "$mount_options" "$@"
+        ;;
+    *) mount "$@" ;;
+    esac
+}
+
 disconnect_qcow() {
     if [ -f /sys/block/nbd0/pid ]; then
         qemu-nbd -d /dev/nbd0
@@ -5782,6 +6470,107 @@ disconnect_qcow() {
         done
     fi
 }
+
+# Copy source-image Btrfs mounts that share its root volume into the target
+# root tree before stale source-volume fstab rows are discarded. The Btrfs
+# destination deliberately uses only @ and @boot, so source /home, /var, and
+# other same-volume mounts become ordinary directories in @.
+copy_btrfs_source_subvolumes() (
+    [ "$#" -eq 6 ] || exit 2
+    local source_root=$1 target_root=$2 source_device=$3 source_uuid=$4 source_partuuid=$5 source_label=$6
+    local fstab_file field_ifs line source mountpoint fstype options subvolume source_matches
+    local temp_dir mounts_file record depth relative_path component target_path current_path
+
+    [ -f "$source_root/etc/fstab" ] || exit 0
+    reinstall_btrfs_valid_uuid "$source_uuid" || exit 2
+    case $source_partuuid in '') ;; *[!A-Za-z0-9-]*) exit 2 ;; esac
+    case $source_label in '') ;; *[!A-Za-z0-9_.+-]*) exit 2 ;; esac
+
+    fstab_file=$source_root/etc/fstab
+    field_ifs=$(printf ' \t')
+    temp_dir=$(mktemp -d /tmp/reinstall-btrfs-source.XXXXXX) || exit 1
+    mounts_file=$temp_dir/mounts
+    : >"$mounts_file" || exit 1
+    cleanup_source_mount() {
+        if [ "${source_mounted:-0}" = 1 ]; then
+            umount "$temp_dir/mount" || true
+        fi
+        rm -rf "$temp_dir"
+    }
+    trap cleanup_source_mount 0
+    trap 'exit 1' HUP INT TERM
+    mkdir -p "$temp_dir/mount" || exit 1
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        source=
+        mountpoint=
+        fstype=
+        options=
+        IFS="$field_ifs" read -r source mountpoint fstype options _ <<EOF
+$line
+EOF
+        case $source in ''|\#*) continue ;; esac
+        [ "$fstype" = btrfs ] || continue
+
+        source_matches=false
+        case $source in
+        "UUID=$source_uuid") source_matches=true ;;
+        "PARTUUID=$source_partuuid") [ -n "$source_partuuid" ] && source_matches=true ;;
+        "LABEL=$source_label") [ -n "$source_label" ] && source_matches=true ;;
+        esac
+        [ "$source_matches" = true ] || continue
+
+        case $mountpoint in
+        /|/boot|/efi|/boot/efi) continue ;;
+        /*) ;;
+        *) echo "Invalid source Btrfs mountpoint: $mountpoint" >&2; exit 1 ;;
+        esac
+        case $mountpoint in
+        *[!A-Za-z0-9_./-]*|*//* ) echo "Unsupported source Btrfs mountpoint: $mountpoint" >&2; exit 1 ;;
+        esac
+        case "/$mountpoint/" in */../*|*/./*) echo "Unsafe source Btrfs mountpoint: $mountpoint" >&2; exit 1 ;; esac
+
+        subvolume=$(printf '%s\n' "$options" | awk -F, '{for (i = 1; i <= NF; i++) if ($i ~ /^subvol=/) { sub(/^subvol=/, "", $i); print $i; exit }}')
+        [ -n "$subvolume" ] || { echo "Missing subvol option for source Btrfs mount $mountpoint." >&2; exit 1; }
+        case $subvolume in
+        *[!A-Za-z0-9_./@+-]*|*//* ) echo "Unsupported source Btrfs subvolume: $subvolume" >&2; exit 1 ;;
+        esac
+        case "/$subvolume/" in */../*|*/./*) echo "Unsafe source Btrfs subvolume: $subvolume" >&2; exit 1 ;; esac
+
+        depth=$(printf '%s\n' "$mountpoint" | awk -F/ '{print NF - 1}')
+        printf '%s\t%s\t%s\n' "$depth" "$mountpoint" "$subvolume" >>"$mounts_file" || exit 1
+    done <"$fstab_file"
+
+    sort -n -k1,1 -k2,2 "$mounts_file" >"$temp_dir/mounts.sorted" || exit 1
+    while IFS="$(printf '\t')" read -r depth mountpoint subvolume; do
+        [ -n "$mountpoint" ] || continue
+        relative_path=${mountpoint#/}
+        target_path=$target_root
+        case $target_path in *[!A-Za-z0-9_./-]*) echo "Unsafe Btrfs target root path." >&2; exit 1 ;; esac
+        [ ! -L "$target_path" ] || { echo "Btrfs target root is a symlink." >&2; exit 1; }
+        current_path=$target_path
+        old_ifs=$IFS
+        IFS=/
+        set -- $relative_path
+        IFS=$old_ifs
+        for component do
+            current_path=$current_path/$component
+            [ ! -L "$current_path" ] || {
+                echo "Refusing to copy through source-image symlink at $current_path." >&2
+                exit 1
+            }
+        done
+        target_path=$current_path
+
+        mount -t btrfs -o "ro,nologreplay,subvol=$subvolume" "$source_device" "$temp_dir/mount" || exit 1
+        source_mounted=1
+        rm -rf -- "$target_path" || exit 1
+        mkdir -p -- "$target_path" || exit 1
+        cp -a "$temp_dir/mount/." "$target_path/" || exit 1
+        umount "$temp_dir/mount" || exit 1
+        source_mounted=0
+    done <"$temp_dir/mounts.sorted"
+)
 
 get_part_size_mb_for_file_size_b() {
     local file_b=$1
@@ -5847,6 +6636,10 @@ get_cloud_image_part_size() {
     # openeuler 是 .qcow2.xz，要解压后才知道 qcow2 大小
     if [ "$distro" = openeuler ]; then
         echo 3GiB
+    elif [ "$distro" = almalinux ] &&
+        [ "${btrfs_almalinux_image_verified:-false}" = true ] &&
+        [ -n "${btrfs_almalinux_image_size:-}" ]; then
+        echo "$(get_part_size_mb_for_file_size_b "$btrfs_almalinux_image_size")MiB"
     elif size_bytes=$(get_http_file_size "$img"); then
         # 缩小 btrfs 需要写 qcow2 ，实测写入后只多了 1M，因此不用特殊处理
         echo "$(get_part_size_mb_for_file_size_b $size_bytes)MiB"
@@ -6291,6 +7084,26 @@ install_qcow_by_copy() {
         # el7 上面那条 grubby 命令不能设置 /etc/default/grub
         sed -i 's/rd.lvm.lv=[^ "]*//g' /os/etc/default/grub
 
+        if [ "$filesystem" = btrfs ]; then
+            os_part_uuid=$(blkid -s UUID -o value "$btrfs_device")
+            [ -n "$os_part_uuid" ] || error_and_exit "Could not read the Btrfs root UUID."
+            chroot_dnf install btrfs-progs
+            mkdir -p /os/etc/dracut.conf.d
+            cat <<'EOF' >/os/etc/dracut.conf.d/10-reinstall-btrfs.conf
+add_dracutmodules+=" btrfs "
+EOF
+            chroot /os dracut --force --regenerate-all
+            rootflags=$(reinstall_btrfs_kernel_rootflags \
+                "$btrfs_root_subvolume" "$btrfs_root_options")
+            chroot /os grubby --update-kernel ALL --remove-args "root rootfstype rootflags"
+            chroot /os grubby --update-kernel ALL --args \
+                "root=UUID=$os_part_uuid rootfstype=btrfs $rootflags"
+            write_btrfs_fstab_for_target /os ||
+                error_and_exit "Could not write Red Hat family Btrfs mount entries to fstab."
+            append_btrfs_grub_cmdline /os ||
+                error_and_exit "Could not add Btrfs rootflags to Red Hat family GRUB configuration."
+        fi
+
         # fstab 添加 efi 分区
         if is_efi; then
             # centos/oracle 要创建efi条目
@@ -6368,15 +7181,21 @@ install_qcow_by_copy() {
             # bios
             remove_grub_conflict_files
             chroot /os/ grub2-install /dev/$xda
+            setup_grub_update_hook_for_target /os
         fi
 
-        # blscfg 启动项
-        # rocky/almalinux镜像是独立的boot分区，但我们不是
-        # 因此要添加boot目录
-        if ls /os/boot/loader/entries/*.conf 2>/dev/null &&
-            ! grep -q 'initrd /boot/' /os/boot/loader/entries/*.conf; then
-
-            sed -i -E 's,((linux|initrd) /),\1boot/,g' /os/boot/loader/entries/*.conf
+        # blscfg boot paths are relative to GRUB's current root. The Btrfs EFI
+        # stub below mounts @boot as /boot, so entries must address that root
+        # directly instead of retaining a nested /boot prefix.
+        if ls /os/boot/loader/entries/*.conf 2>/dev/null; then
+            if [ "$filesystem" = btrfs ]; then
+                normalize_redhat_btrfs_bls_paths /os/boot/loader/entries ||
+                    error_and_exit "Could not normalize Red Hat family Btrfs BLS boot paths."
+            elif ! grep -qE '^[[:space:]]*initrd[[:space:]]+/boot/' /os/boot/loader/entries/*.conf; then
+                # Rocky/AlmaLinux images have a separate boot partition, but
+                # the ext4 target layout places /boot in the root filesystem.
+                sed -i -E 's,((linux|initrd) /),\1boot/,g' /os/boot/loader/entries/*.conf
+            fi
         fi
 
         # grub-efi-x64 包里面有 /etc/grub2-efi.cfg
@@ -6393,7 +7212,38 @@ install_qcow_by_copy() {
         # efi 分区 grub.cfg
         # https://github.com/rhinstaller/anaconda/blob/346b932a26a19b339e9073c049b08bdef7f166c3/pyanaconda/modules/storage/bootloader/efi.py#L198
         # https://github.com/rhinstaller/anaconda/commit/15c3b2044367d375db6739e8b8f419ef3e17cae7
-        if is_efi && ! echo "$grub_o_cfg" | grep -q '/boot/efi/EFI'; then
+        if [ "$filesystem" = btrfs ]; then
+            if is_efi; then
+                grub_efi_cfg_path=$grub_o_cfg
+                case $grub_efi_cfg_path in
+                /boot/efi/EFI/*/grub.cfg)
+                    distro_efi=${grub_efi_cfg_path#/boot/efi/EFI/}
+                    distro_efi=${distro_efi%%/*}
+                    ;;
+                *)
+                    distro_efi=
+                    ;;
+                esac
+                if [ -z "$distro_efi" ]; then
+                    # Oracle's EFI directory is named redhat; other vendor
+                    # images normally have a single non-fallback directory.
+                    # shellcheck disable=SC2010
+                    distro_efi=$(cd /os/boot/efi/EFI/ && ls -d -- * | grep -Eiv '^(BOOT|Microsoft)$' | head -n 1)
+                fi
+                [ -n "$distro_efi" ] || error_and_exit "Could not identify the Red Hat family EFI boot directory."
+                write_redhat_btrfs_efi_stub \
+                    "/os/boot/efi/EFI/$distro_efi/grub.cfg" "$os_part_uuid" ||
+                    error_and_exit "Could not write the Red Hat family Btrfs EFI stub."
+                # grubby and future kernel-install transactions follow this
+                # selector. Point it at the real menu on @boot, not the ESP
+                # forwarding stub that firmware reads first.
+                set_redhat_btrfs_grub_config_target /os ||
+                    error_and_exit "Could not redirect Red Hat family GRUB configuration updates to @boot."
+            fi
+            # Keep the real menu on @boot so kernel-install and grubby updates
+            # continue to target the filesystem selected by /boot in fstab.
+            grub_o_cfg=/boot/grub2/grub.cfg
+        elif is_efi && ! echo "$grub_o_cfg" | grep -q '/boot/efi/EFI'; then
             # oracle linux 文件夹是 redhat
             # shellcheck disable=SC2010
             distro_efi=$(cd /os/boot/efi/EFI/ && ls -d -- * | grep -Eiv BOOT)
@@ -6653,7 +7503,7 @@ EOF
         # 更改 efi 目录的 grub.cfg 写死的 fsuuid
         # 因为 24.04 fsuuid 对应 boot 分区
         efi_grub_cfg=$os_dir/boot/efi/EFI/ubuntu/grub.cfg
-        if is_efi; then
+        if is_efi && [ "$filesystem" != btrfs ]; then
             os_uuid=$(lsblk -rno UUID "/dev/$(xda 2)")
             sed -Ei "s|[0-9a-f-]{36}|$os_uuid|i" $efi_grub_cfg
 
@@ -6690,6 +7540,27 @@ EOF
         if ! is_efi; then
             # bios 删除 efi 条目
             sed -i '/[[:space:]]\/boot\/efi[[:space:]]/d' $os_dir/etc/fstab
+        fi
+
+        if [ "$filesystem" = btrfs ]; then
+            chroot_apt_install "$os_dir" btrfs-progs
+            mkdir -p "$os_dir/etc/initramfs-tools"
+            if ! grep -qx btrfs "$os_dir/etc/initramfs-tools/modules" 2>/dev/null; then
+                printf 'btrfs\n' >>"$os_dir/etc/initramfs-tools/modules"
+            fi
+            write_btrfs_fstab_for_target "$os_dir" ||
+                error_and_exit "Could not write Ubuntu Btrfs mount entries to fstab."
+            append_btrfs_grub_cmdline "$os_dir" ||
+                error_and_exit "Could not add Btrfs rootflags to Ubuntu GRUB configuration."
+            chroot "$os_dir" update-initramfs -u -k all
+            chroot "$os_dir" update-grub
+            if is_efi; then
+                os_uuid=$(blkid -s UUID -o value "$btrfs_device") ||
+                    error_and_exit "Could not read the Ubuntu Btrfs UUID for its EFI stub."
+                write_top_level_btrfs_efi_stub \
+                    "$os_dir/boot/efi/EFI/ubuntu/grub.cfg" "$os_uuid" grub ||
+                    error_and_exit "Could not write the Ubuntu Btrfs EFI stub."
+            fi
         fi
 
         if [ "${network_backend:-auto}" = auto ]; then
@@ -6730,23 +7601,6 @@ EOF
         lvchange -ay "$vg"
     fi
 
-    mount_nouuid() {
-        part_fstype=
-        for arg in "$@"; do
-            case "$arg" in
-            /dev/*)
-                part_fstype=$(lsblk -no FSTYPE "$arg")
-                break
-                ;;
-            esac
-        done
-
-        case "$part_fstype" in
-        xfs) mount -o nouuid "$@" ;;
-        *) mount "$@" ;;
-        esac
-    }
-
     # 可以直接选择最后一个分区为系统分区?
     # almalinux9 boot 分区的类型不是规定的 uuid
     # openeuler boot 分区是 vfat 格式
@@ -6765,7 +7619,7 @@ EOF
     os_part='' boot_part='' efi_part=''
     mkdir -p /nbd-test
     for part in $(lsblk /dev/nbd0p* --sort SIZE -no NAME,FSTYPE |
-        grep -E ' (ext4|xfs|fat|vfat)$' | awk '{print $1}' | tac); do
+        grep -E ' (btrfs|ext4|xfs|fat|vfat)$' | awk '{print $1}' | tac); do
         mapper_part=$part
         if $is_lvm_image && [ -e /dev/mapper/$part ]; then
             mapper_part=mapper/$part
@@ -6809,6 +7663,11 @@ EOF
 
     IFS=, read -r os_part_uuid os_part_label os_part_fstype \
         < <(lsblk /dev/$os_part -rno UUID,LABEL,FSTYPE | tr ' ' ,)
+    os_part_partuuid=$(lsblk "/dev/$os_part" -rno PARTUUID)
+    cloud_source_part_uuid=$os_part_uuid
+    cloud_source_part_partuuid=$os_part_partuuid
+    cloud_source_part_label=$os_part_label
+    cloud_source_part_fstype=$os_part_fstype
 
     if [ -n "$efi_part" ]; then
         IFS=, read -r efi_part_uuid efi_part_label \
@@ -6819,19 +7678,29 @@ EOF
 
     # 使用目标系统的格式化程序
     # centos8 如果用alpine格式化xfs，grub2-mkconfig和grub2里面都无法识别xfs分区
-    mount_nouuid /dev/$os_part /nbd/
-    mount_pseudo_fs /nbd/
-    case "$os_part_fstype" in
-    ext4) chroot /nbd mkfs.ext4 -F -L "$os_part_label" -U "$os_part_uuid" "/dev/$(xda 2)" ;;
-    xfs) chroot /nbd mkfs.xfs -f -L "$os_part_label" -m uuid=$os_part_uuid "/dev/$(xda 2)" ;;
-    esac
-    umount -R /nbd/
+    if [ "$filesystem" = btrfs ]; then
+        # The target format is already decided; don't mount a Btrfs source
+        # image read-write just to access a formatter that will not be used.
+        :
+    else
+        mount_nouuid /dev/$os_part /nbd/
+        mount_pseudo_fs /nbd/
+        case "$os_part_fstype" in
+        ext4) chroot /nbd mkfs.ext4 -F -L "$os_part_label" -U "$os_part_uuid" "/dev/$(xda 2)" ;;
+        xfs) chroot /nbd mkfs.xfs -f -L "$os_part_label" -m uuid=$os_part_uuid "/dev/$(xda 2)" ;;
+        esac
+        umount -R /nbd/
+    fi
 
     # TODO: ubuntu 镜像缺少 mkfs.fat/vfat/dosfstools? initrd 不需要检查fs完整性？
 
     # 创建并挂载 /os
     mkdir -p /os
-    mount -o noatime "/dev/$(xda 2)" /os/
+    if [ "$filesystem" = btrfs ]; then
+        mount_part_basic_layout /os /os/boot/efi
+    else
+        mount -o noatime "/dev/$(xda 2)" /os/
+    fi
 
     # 如果是 efi 则创建 /os/boot/efi
     # 如果镜像有 efi 分区也创建 /os/boot/efi，用于复制 efi 分区的文件
@@ -6841,7 +7710,7 @@ EOF
         # 挂载 /os/boot/efi
         # 预先挂载 /os/boot/efi 因为可能 boot 和 efi 在同一个分区（openeuler 24.03 arm）
         # 复制 boot 时可以会复制 efi 的文件
-        if is_efi; then
+        if is_efi && [ "$filesystem" != btrfs ]; then
             mount -o $efi_mount_opts "/dev/$(xda 1)" /os/boot/efi/
         fi
     fi
@@ -6849,7 +7718,13 @@ EOF
     # 复制系统分区
     echo Copying os partition...
     mount_nouuid -o ro /dev/$os_part /nbd/
-    cp -a /nbd/* /os/
+    cp -a /nbd/. /os/
+    if [ "$filesystem" = btrfs ] && [ "$cloud_source_part_fstype" = btrfs ]; then
+        copy_btrfs_source_subvolumes \
+            /nbd /os "/dev/$os_part" "$cloud_source_part_uuid" \
+            "$cloud_source_part_partuuid" "$cloud_source_part_label" ||
+            error_and_exit "Could not copy source Btrfs subvolumes into the target root tree."
+    fi
     umount /nbd/
 
     # 复制独立的boot分区，如果有
@@ -6883,6 +7758,9 @@ EOF
     if is_efi; then
         umount /os/boot/efi/
     fi
+    if [ "$filesystem" = btrfs ]; then
+        umount /os/boot/
+    fi
     umount /os/
     umount /installer/
 
@@ -6901,15 +7779,45 @@ EOF
     # 删除 installer 分区并扩容
     info "Delete installer partition"
     apk add parted
-    parted /dev/$xda -s -- rm 3
+    if [ "$filesystem" = btrfs ]; then
+        parted /dev/$xda -s -- rm "$btrfs_installer_part_num"
+    else
+        parted /dev/$xda -s -- rm 3
+    fi
     update_part
     resize_after_install_cloud_image
 
     # 重新挂载 /os /boot/efi
     info "Re-mount disk"
-    mount -o noatime "/dev/$(xda 2)" /os/
-    if is_efi; then
+    if [ "$filesystem" = btrfs ]; then
+        mount_part_basic_layout /os /os/boot/efi
+    else
+        mount -o noatime "/dev/$(xda 2)" /os/
+    fi
+    if is_efi && [ "$filesystem" != btrfs ]; then
         mount -o $efi_mount_opts "/dev/$(xda 1)" /os/boot/efi/
+    fi
+
+    if [ "$filesystem" = btrfs ] && [ "$distro" = opensuse ]; then
+        prepare_opensuse_btrfs_root /os ||
+            error_and_exit "Could not prepare the openSUSE Btrfs root boot configuration."
+        umount /os/boot/efi/
+        umount /os/boot/
+        umount /os/
+
+        # Remount all installer targets after preparation. modify_linux can then
+        # write kernel, initramfs, GRUB config and EFI files to their final
+        # filesystems instead of the root subvolume's empty mountpoint dirs.
+        mount_part_basic_layout /os /os/boot/efi ||
+            error_and_exit "Could not remount the openSUSE Btrfs root, @boot and EFI partition."
+
+        # Reuse openSUSE's existing cloud-image setup (network profiles,
+        # kernel selection, cloud-init cleanup, and first-boot setup) against
+        # the new @/@boot layout.
+        modify_linux /os
+        finalize_opensuse_btrfs_root /os ||
+            error_and_exit "Could not finalize the openSUSE Btrfs initramfs or GRUB configuration."
+        return 0
     fi
 
     # 创建 swap
@@ -7171,6 +8079,7 @@ mount_part_basic_layout() {
     local efi_dir=$2
     local layout_plan
     local ext4_layout_plan boot_mode disk_size
+    local btrfs_root_mount_options btrfs_boot_mount_options btrfs_layout_root_options
 
     # 挂载系统分区
     mkdir -p "$os_dir"
@@ -7179,18 +8088,25 @@ mount_part_basic_layout() {
         os_part_num=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "root" {print $2}')
         efi_part_num=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "partition" && $3 == "esp" {print $2}')
         btrfs_root_subvolume=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $2}')
-        btrfs_root_options=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $4}')
+        btrfs_layout_root_options=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/" {print $4}')
         btrfs_boot_subvolume=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $2}')
         btrfs_boot_policy=$(printf '%s\n' "$layout_plan" | awk -F '\t' '$1 == "subvolume" && $3 == "/boot" {print $4}')
         if [ -z "$os_part_num" ] || [ -z "$btrfs_root_subvolume" ] ||
-            [ -z "$btrfs_boot_subvolume" ] || [ "$btrfs_root_options" != compress=zstd ] ||
+            [ -z "$btrfs_boot_subvolume" ] ||
+            [ "$btrfs_layout_root_options" != "${btrfs_root_options:-}" ] ||
             [ "$btrfs_boot_policy" != no-compression ] || { is_efi && [ -z "$efi_part_num" ]; }; then
             error_and_exit "Invalid Btrfs mount layout."
         fi
         btrfs_device="/dev/$(xda "$os_part_num")"
-        mount -t btrfs -o "subvol=$btrfs_root_subvolume,$btrfs_root_options" "$btrfs_device" "$os_dir"
+        btrfs_root_mount_options="subvol=$btrfs_root_subvolume"
+        [ -z "${btrfs_root_options:-}" ] ||
+            btrfs_root_mount_options="$btrfs_root_mount_options,$btrfs_root_options"
+        mount -t btrfs -o "$btrfs_root_mount_options" "$btrfs_device" "$os_dir"
         mkdir -p "$os_dir/boot"
-        mount -t btrfs -o "subvol=$btrfs_boot_subvolume" "$btrfs_device" "$os_dir/boot"
+        btrfs_boot_mount_options="subvol=$btrfs_boot_subvolume"
+        [ -z "${btrfs_root_options:-}" ] ||
+            btrfs_boot_mount_options="$btrfs_boot_mount_options,$btrfs_root_options"
+        mount -t btrfs -o "$btrfs_boot_mount_options" "$btrfs_device" "$os_dir/boot"
     else
         if is_efi; then
             boot_mode=efi
@@ -7236,6 +8152,176 @@ write_btrfs_fstab() {
         reinstall_btrfs_write_fstab \
             "$os_dir" "$root_uuid" "$btrfs_root_subvolume" \
             "$btrfs_boot_subvolume" "$btrfs_root_options"
+    fi
+}
+
+write_btrfs_fstab_for_target() {
+    local os_dir=$1
+    if [ "${cloud_source_part_fstype:-}" = btrfs ] &&
+        [ -n "${cloud_source_part_uuid:-}" ]; then
+        reinstall_btrfs_remove_fstab_source_volume_mounts \
+            "$os_dir" "$cloud_source_part_uuid" \
+            "${cloud_source_part_partuuid:-}" \
+            "${cloud_source_part_label:-}" || return 1
+    fi
+    write_btrfs_fstab "$os_dir" || return 1
+    case "$distro" in
+    alpine | ubuntu | fedora | almalinux | oracle | opensuse)
+        if is_efi; then
+            sed -i 's@[[:space:]]/efi[[:space:]]vfat[[:space:]]@ /boot/efi vfat @' "$os_dir/etc/fstab"
+        fi
+        ;;
+    esac
+}
+
+write_redhat_btrfs_efi_stub() (
+    [ "$#" -eq 2 ] || exit 2
+    local stub_path=$1 root_uuid=$2
+    reinstall_btrfs_valid_uuid "$root_uuid" || exit 2
+    [ -d "$(dirname "$stub_path")" ] || exit 1
+    cat >"$stub_path" <<EOF
+search --no-floppy --fs-uuid --set=root $root_uuid
+set btrfs_relative_path="y"
+export btrfs_relative_path
+btrfs-mount-subvol (\$root) /boot @boot
+set prefix=(\$root)/boot/grub2
+export prefix
+configfile \$prefix/grub.cfg
+EOF
+)
+
+write_top_level_btrfs_efi_stub() (
+    [ "$#" -eq 3 ] || exit 2
+    local stub_path=$1 root_uuid=$2 grub_directory=$3
+    reinstall_btrfs_valid_uuid "$root_uuid" || exit 2
+    case $grub_directory in grub|grub2) ;; *) exit 2 ;; esac
+    [ -d "$(dirname "$stub_path")" ] || exit 1
+    cat >"$stub_path" <<EOF
+search.fs_uuid $root_uuid root
+set prefix=(\$root)'/@boot/$grub_directory'
+export prefix
+configfile \$prefix/grub.cfg
+EOF
+)
+
+set_redhat_btrfs_grub_config_target() {
+    [ "$#" -eq 1 ] || return 2
+    local target_root=$1
+    [ -d "$target_root/etc" ] || return 1
+    ln -sfn /boot/grub2/grub.cfg "$target_root/etc/grub2-efi.cfg"
+}
+
+normalize_redhat_btrfs_bls_paths() {
+    [ "$#" -eq 1 ] || return 2
+    local entries_dir=$1 entry
+    [ -d "$entries_dir" ] || return 1
+    for entry in "$entries_dir"/*.conf; do
+        [ -f "$entry" ] || continue
+        sed -i -E 's,((linux|linuxefi|initrd|initrdefi)[[:space:]]+)/boot/,\1/,g' "$entry" || return 1
+    done
+}
+
+append_btrfs_grub_cmdline() {
+    local os_dir=$1 rootflags root_uuid grub_defaults grub_tmp grub_cmdline_var
+    grub_defaults=$os_dir/etc/default/grub
+    [ -f "$grub_defaults" ] || return 1
+    root_uuid=$(blkid -s UUID -o value "$btrfs_device") || return 1
+    [ -n "$root_uuid" ] || return 1
+    rootflags=$(reinstall_btrfs_kernel_rootflags \
+        "${btrfs_root_subvolume:-@}" "${btrfs_root_options:-}") || return 1
+    rootflags="root=UUID=$root_uuid rootfstype=btrfs $rootflags"
+    case "$distro" in
+    opensuse) grub_cmdline_var=GRUB_CMDLINE_LINUX_DEFAULT ;;
+    *) grub_cmdline_var=GRUB_CMDLINE_LINUX ;;
+    esac
+    grub_tmp=$(mktemp "$(dirname "$grub_defaults")/.grub-btrfs.XXXXXX") || return 1
+    awk '
+        skip { skip = 0; next }
+        $0 == "# reinstall managed Btrfs rootflags" { skip = 1; next }
+        { print }
+    ' "$grub_defaults" >"$grub_tmp" || {
+        rm -f "$grub_tmp"
+        return 1
+    }
+    {
+        printf '%s\n' '# reinstall managed Btrfs rootflags'
+        printf "%s=\"\${%s:+\$%s }%s\"\n" \
+            "$grub_cmdline_var" "$grub_cmdline_var" "$grub_cmdline_var" "$rootflags"
+    } >>"$grub_tmp"
+    cat "$grub_tmp" >"$grub_defaults"
+    rm -f "$grub_tmp"
+}
+
+prepare_opensuse_btrfs_root() {
+    local os_dir=$1 root_uuid efi_grub_cfg
+    [ "$distro" = opensuse ] && [ "$filesystem" = btrfs ] && is_efi || return 1
+    [ -f "$os_dir/etc/default/grub" ] || return 1
+    [ -d "$os_dir/boot/efi/EFI/opensuse" ] || return 1
+
+    root_uuid=$(blkid -s UUID -o value "$btrfs_device") || return 1
+    [ -n "$root_uuid" ] || return 1
+
+    # The empty @boot was marked before the image copy. Reassert +m before
+    # any distro tooling can write a replacement kernel or initramfs.
+    chattr +m "$os_dir/boot" || return 1
+    write_btrfs_fstab_for_target "$os_dir" || return 1
+    append_btrfs_grub_cmdline "$os_dir" || return 1
+    sed -i '/^SUSE_BTRFS_SNAPSHOT_BOOTING=/d' "$os_dir/etc/default/grub"
+    printf '%s\n' 'SUSE_BTRFS_SNAPSHOT_BOOTING="true"' >>"$os_dir/etc/default/grub"
+
+    mkdir -p "$os_dir/etc/dracut.conf.d" || return 1
+    cat <<'EOF' >"$os_dir/etc/dracut.conf.d/10-reinstall-btrfs.conf"
+add_dracutmodules+=" btrfs "
+EOF
+
+    efi_grub_cfg=$os_dir/boot/efi/EFI/opensuse/grub.cfg
+    cat <<EOF >"$efi_grub_cfg"
+search --no-floppy --fs-uuid --set=root $root_uuid
+set btrfs_relative_path="y"
+export btrfs_relative_path
+btrfs-mount-subvol (\$root) /boot @boot
+set prefix=(\$root)/boot/grub2
+configfile \$prefix/grub.cfg
+EOF
+}
+
+finalize_opensuse_btrfs_root() {
+    local os_dir=$1 root_uuid efi_grub_cfg
+    [ "$distro" = opensuse ] && [ "$filesystem" = btrfs ] && is_efi || return 1
+
+    root_uuid=$(blkid -s UUID -o value "$btrfs_device") || return 1
+    [ -n "$root_uuid" ] || return 1
+    efi_grub_cfg=$os_dir/boot/efi/EFI/opensuse/grub.cfg
+    [ -d "$(dirname "$efi_grub_cfg")" ] || return 1
+    chattr +m "$os_dir/boot" || return 1
+    sed -i '/^SUSE_BTRFS_SNAPSHOT_BOOTING=/d' "$os_dir/etc/default/grub"
+    printf '%s\n' 'SUSE_BTRFS_SNAPSHOT_BOOTING="true"' >>"$os_dir/etc/default/grub"
+    cat <<EOF >"$efi_grub_cfg"
+search --no-floppy --fs-uuid --set=root $root_uuid
+set btrfs_relative_path="y"
+export btrfs_relative_path
+btrfs-mount-subvol (\$root) /boot @boot
+set prefix=(\$root)/boot/grub2
+configfile \$prefix/grub.cfg
+EOF
+
+    if ! chroot "$os_dir" rpm -q btrfsprogs >/dev/null 2>&1; then
+        chroot "$os_dir" zypper --non-interactive install --no-recommends btrfsprogs || return 1
+    fi
+    chroot "$os_dir" dracut --force --regenerate-all || return 1
+    chroot "$os_dir" grub2-mkconfig -o /boot/grub2/grub.cfg
+}
+
+ensure_mkinitcpio_btrfs_module() {
+    local os_dir=$1 mkinitcpio_conf=$1/etc/mkinitcpio.conf
+    [ -f "$mkinitcpio_conf" ] || return 1
+    if grep -Eq '^MODULES=.*btrfs([ )]|$)' "$mkinitcpio_conf"; then
+        return 0
+    fi
+    if grep -q '^MODULES=(' "$mkinitcpio_conf"; then
+        sed -i '/^MODULES=/s/(/(btrfs /' "$mkinitcpio_conf"
+    else
+        printf '\nMODULES=(btrfs)\n' >>"$mkinitcpio_conf"
     fi
 }
 
@@ -9737,27 +10823,42 @@ trans() {
         cloud_image=1
     fi
 
+    # The actual AlmaLinux release is part of the Btrfs capability decision.
+    # Inspect its official qcow2 read-only before create_part and retain that
+    # exact download for download_qcow to reuse after the installer partition
+    # exists.
+    if reinstall_btrfs_almalinux_cloud_preflight_pending; then
+        reinstall_btrfs_preflight_almalinux_cloud_image
+    fi
+
     if is_use_cloud_image; then
         case "$img_type" in
         qemu)
             create_part
             download_qcow
-            case "$distro" in
-            centos | almalinux | rocky | oracle | redhat | anolis | opencloudos | openeuler)
-                # 这几个系统云镜像系统盘是8~9g xfs，而我们的目标是能在5g硬盘上运行，因此改成复制系统文件
-                install_qcow_by_copy
-                ;;
-            ubuntu)
-                # 24.04 云镜像有 boot 分区（在系统分区之前），因此不直接 dd 云镜像
-                install_qcow_by_copy
-                ;;
-            *)
-                # debian fedora opensuse arch gentoo any
-                dd_qcow
-                resize_after_install_cloud_image
-                modify_os_on_disk linux
-                ;;
-            esac
+            if [ "$filesystem" = btrfs ]; then
+                case "$distro" in
+                fedora | almalinux | oracle | ubuntu | opensuse) install_qcow_by_copy ;;
+                *) error_and_exit "No Btrfs cloud-copy adapter is available for $distro $releasever." ;;
+                esac
+            else
+                case "$distro" in
+                centos | almalinux | rocky | oracle | redhat | anolis | opencloudos | openeuler)
+                    # 这几个系统云镜像系统盘是8~9g xfs，而我们的目标是能在5g硬盘上运行，因此改成复制系统文件
+                    install_qcow_by_copy
+                    ;;
+                ubuntu)
+                    # 24.04 云镜像有 boot 分区（在系统分区之前），因此不直接 dd 云镜像
+                    install_qcow_by_copy
+                    ;;
+                *)
+                    # debian fedora opensuse arch gentoo any
+                    dd_qcow
+                    resize_after_install_cloud_image
+                    modify_os_on_disk linux
+                    ;;
+                esac
+            fi
             ;;
         raw)
             # 暂时没用到 raw 格式的云镜像
@@ -9867,6 +10968,19 @@ elif [ "$1" = "alpine" ]; then
     cloud_image=0
 elif [ -n "$1" ]; then
     error_and_exit "unknown option $1"
+fi
+
+if [ "$filesystem" = btrfs ]; then
+    if ! reinstall_btrfs_almalinux_cloud_preflight_pending; then
+        reinstall_btrfs_require_trans_mode
+    fi
+    target_kernel_variant=$(reinstall_btrfs_default_kernel_variant "$distro" "$releasever") ||
+        error_and_exit "No Btrfs-capable target kernel route is defined for $distro $releasever."
+    btrfs_root_options=$(reinstall_btrfs_validate_mount_options \
+        "$distro" "$releasever" "$target_kernel_variant" \
+        "${btrfs_compression:-zstd}" "${btrfs_compression_level:-}" \
+        "${btrfs_options:-}" "${btrfs_options_override:-false}") ||
+        error_and_exit "Invalid or unsupported Btrfs mount options for $distro $releasever ($target_kernel_variant)."
 fi
 
 # 无参数运行部分

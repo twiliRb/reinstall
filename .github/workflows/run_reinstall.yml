@@ -22,8 +22,8 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends e2fsprogs shellcheck xmlstarlet
-          printf 'CHECKPOINT static/dependencies: e2fsprogs=available shellcheck=available xmlstarlet=available\n'
+          sudo apt-get install --yes --no-install-recommends e2fsprogs grub-common shellcheck xmlstarlet
+          printf 'CHECKPOINT static/dependencies: e2fsprogs=available grub-script-check=available shellcheck=available xmlstarlet=available\n'
       - name: Check shell syntax
         run: |
           mapfile -d '' shell_files < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
@@ -79,6 +79,14 @@ jobs:
         run: sh tests/test_reinstall_ext4_format.sh
       - name: Test Btrfs target configuration
         run: sh tests/test_reinstall_btrfs_target_config.sh
+      - name: Test Btrfs install integration
+        run: bash tests/test_trans_btrfs_integration.sh
+      - name: Test Fedora Btrfs adapter
+        run: bash tests/test_reinstall_fedora_btrfs_adapter.sh
+      - name: Test Debian Btrfs adapter
+        run: sh tests/test_reinstall_debian_btrfs_adapter.sh
+      - name: Test GRUB update hook
+        run: sh tests/test_reinstall_grub_hook.sh
       - name: Test Windows value and XML serializers
         run: bash tests/test_windows_serialize.sh
       - name: Lint GitHub Actions
@@ -299,7 +307,9 @@ jobs:
           source tests/smoke-quiet.sh
           test_ssh_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj7Ml2PQbt9pkYbcXn6axzAP2ZKZh0PTLg1dp8R5ROy ci@reinstall'
           run_smoke_failure_check 'invalid filesystem' 'Invalid --filesystem value: invalid' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem invalid debian --ci
-          run_smoke_failure_check 'unsupported Btrfs target' '--filesystem=btrfs is supported only for Arch, Gentoo, NixOS, and AOSC.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem btrfs debian --ci
+          run_smoke_failure_check 'unsupported Btrfs target' '--filesystem=btrfs is unsupported for redhat' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem btrfs redhat --ci
+          run_smoke_failure_check 'invalid Btrfs compression' 'Invalid or conflicting Btrfs compression/options configuration.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem btrfs --btrfs-compression invalid fedora --ci
+          run_smoke_failure_check 'conflicting Btrfs compression options' '--btrfs-options cannot be combined with' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --filesystem btrfs --btrfs-options noatime --btrfs-compression zstd fedora --ci
           run_smoke_failure_check 'invalid network backend' 'Invalid --network-backend value: invalid' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --network-backend invalid debian --ci
           run_smoke_failure_check 'unsupported network backend' '--network-backend=systemd-networkd is not supported for alpine.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --network-backend systemd-networkd alpine --ci
           run_smoke_failure_check 'static DNS without servers' '--dns-mode=static requires --dns-servers.' -- sudo env REINSTALL_SOURCE_COMMIT="$REINSTALL_SOURCE_COMMIT" bash reinstall.sh --dns-mode static debian --ci

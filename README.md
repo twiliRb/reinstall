@@ -176,7 +176,10 @@ bash reinstall.sh anolis      7|8|23
 - `--ssh-key KEY` 设置 SSH 登录公钥，[格式如下](#--ssh-key)。当使用公钥时，密码为空
 - `--ssh-port PORT` 修改 SSH 端口
 - `--web-port PORT` 修改 Web 端口（安装期间观察日志用）
-- `--filesystem ext4|btrfs` 选择根文件系统，默认 `ext4`。首版 Btrfs 仅支持 Arch、Gentoo、NixOS、AOSC：`/` 使用 `@` 子卷并启用 `compress=zstd`，`/boot` 使用 `@boot` 子卷且关闭压缩；UEFI 的 ESP 挂载在 `/efi`
+- `--filesystem=ext4|btrfs` 选择根文件系统，默认 `ext4`
+- `--btrfs-compression=zstd|zlib|lzo|none` 设置 Btrfs 压缩方式，默认 `zstd`；`none` 不添加压缩挂载选项
+- `--btrfs-compression-level=N` 设置 zstd 或 zlib 等级，省略或 `0` 使用算法默认值；LZO 不支持等级
+- `--btrfs-options=OPTIONS` 完整覆盖 Btrfs 挂载选项，与两个压缩参数互斥；例如 `compress=zstd:3,noatime,discard=async`。只接受已知且目标内核支持的选项，拒绝冲突、未知项、`ro`、`compress-force`、`subvol*` 和 `device*`
 - `--ip-mode auto|dhcp|static` 选择目标系统的 IPv4 获取方式，默认 `auto` 保留现有自动判断；`static` 使用当前采集到的 IP 和网关
 - `--dns-mode auto|dhcp|static` 选择目标系统的 DNS 方式，默认 `auto` 保留现有行为；静态 IP 配合 `dhcp` 时会保存安装期间从 DHCP/RA 获取的 DNS；Debian 系安装器在获取远程 preseed 前会使用 `static` 指定的 DNS
 - `--dns-servers IP[,IP...]` 设置静态 DNS，支持 IPv4/IPv6 地址，须与 `--dns-mode static` 一起使用
@@ -186,7 +189,22 @@ bash reinstall.sh anolis      7|8|23
 - `--hold 1` 仅重启到安装环境，不运行安装，用于 SSH 登录验证网络连通性
 - `--hold 2` 安装结束后不重启，用于 SSH 登录修改系统内容，Debian/Kali 会挂载在 `/target`，其它系统会挂载在 `/os`
 
-> Btrfs 安装会在分区前检查内核对 `/boot` no-compression 属性的支持，需要 e2fsprogs 1.46.2 或更新版本提供的 `chattr +m`。
+#### Btrfs 根分区支持
+
+支持范围按安装器、版本和目标内核确定。安装器会在分区前校验算法、等级和挂载选项，不支持时会报错，不会自动降级。
+
+| 安装路径 | Btrfs 根分区目标 | 限制 |
+| --- | --- | --- |
+| 直接安装 | Arch、Gentoo、AOSC、NixOS 26.05、Alpine 3.21–3.24 | AOSC 使用仓库自定义流程；其 [LiveKit 上游曾明确警告不要将系统安装到 Btrfs](https://wiki.aosc.io/developer/minutes/20230624/) |
+| Debian Installer | Debian 10–13、Kali rolling / last-snapshot | Debian 9 不支持此 Btrfs 路径 |
+| Fedora 安装器 / 云镜像 | Fedora 43–44 | AlmaLinux 的 Kickstart 路径不支持 Btrfs |
+| 云镜像转换 | openSUSE Leap 16.0 / Tumbleweed、Ubuntu 18.04–26.04、Oracle Linux 8–10、AlmaLinux 10.2+ | Oracle Linux 仅 UEK；Ubuntu 使用项目的手动集成路径，不支持 Subiquity ISO 路径；openSUSE 仅支持 UEFI 的官方 QEMU 云镜像 |
+
+不会因为系统包含 Btrfs 驱动就自动视为支持：通用 `redhat` 自定义镜像，以及 CentOS、Rocky、AlmaLinux 8/9、Anolis、OpenCloudOS、openEuler、FNOS 和 FygoOS 均不在 Btrfs 根启动支持列表中。
+
+压缩能力按目标内核基线校验：zstd/zlib 算法要求内核 4.14 或更新；zlib 等级 1–9 要求 4.14 或更新；zstd 正等级 1–15 要求 5.1 或更新，负等级 -1…-15 要求 6.15 或更新。自定义挂载项中的 `discard=async` 要求 5.6。目标内核能力使用保守的发行版/版本/内核变体表判断，不参考当前安装环境内核；已移除或不能确认适用的旧挂载项会被拒绝。[Btrfs 压缩文档](https://btrfs.readthedocs.io/en/latest/Compression.html)
+
+默认子卷为 `@`（`/`）和 `@boot`（`/boot`）。同一 Btrfs 文件系统的子卷挂载共享压缩选项，因此 `@boot` 在创建后、写入引导文件前设置 `chattr +m`，让新文件继承不压缩标记；`compress-force` 始终拒绝，因为它会绕过该排除标记。[Btrfs 挂载选项与文件属性](https://btrfs.readthedocs.io/en/latest/btrfs-man5.html#mount-options)
 
 > [!TIP]
 >

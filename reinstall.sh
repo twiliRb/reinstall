@@ -109,7 +109,10 @@ Usage: $reinstall_____ anolis      7|8|23
                        [--ssh-port    PORT]
                        [--web-port    PORT]
                        [--frpc-config PATH]
-                       [--filesystem  ext4|btrfs] (Btrfs: Arch/Gentoo/NixOS/AOSC)
+                       [--filesystem=ext4|btrfs]
+                       [--btrfs-compression=zstd|zlib|lzo|none] (default: zstd)
+                       [--btrfs-compression-level=N] (0/omitted: algorithm default)
+                       [--btrfs-options=OPTIONS] (full mount-option override)
                        [--ip-mode    auto|dhcp|static]
                        [--dns-mode   auto|dhcp|static]
                        [--dns-servers IP[,IP...]] (required for --dns-mode=static)
@@ -3583,7 +3586,24 @@ build_extra_cmdline() {
     done
 
     if [ "$filesystem" = btrfs ]; then
+        # debian.cfg's partman/early_command decodes these extra_* values from
+        # /proc/cmdline before it selects the partition recipe.
         extra_cmdline+=" $(reinstall_cmdline_serialize extra_filesystem "$filesystem")"
+        extra_cmdline+=" $(reinstall_cmdline_serialize extra_btrfs_target_distro "$distro")"
+        if [ -n "$releasever" ]; then
+            extra_cmdline+=" $(reinstall_cmdline_serialize extra_btrfs_target_releasever "$releasever")"
+        fi
+        extra_cmdline+=" $(reinstall_cmdline_serialize extra_btrfs_target_kernel_variant "$target_kernel_variant")"
+        if [ "$btrfs_options_override" -eq 1 ]; then
+            extra_cmdline+=" $(reinstall_cmdline_serialize extra_btrfs_options "$btrfs_options")"
+        else
+            if [ "$btrfs_compression_set" -eq 1 ]; then
+                extra_cmdline+=" $(reinstall_cmdline_serialize extra_btrfs_compression "$btrfs_compression")"
+            fi
+            if [ "$btrfs_compression_level_set" -eq 1 ]; then
+                extra_cmdline+=" $(reinstall_cmdline_serialize extra_btrfs_compression_level "$btrfs_compression_level")"
+            fi
+        fi
     fi
 
     if [ "$network_backend" != auto ]; then
@@ -3829,7 +3849,9 @@ mod_initrd_debian_kali() {
 
             elif [[ "$line" = Priority:* ]]; then
                 # shellcheck disable=SC2154
-                if [ "$line" = "Priority: standard" ]; then
+                if [ "$package" = partman-btrfs ]; then
+                    line="Priority: $partman_btrfs_priority"
+                elif [ "$line" = "Priority: standard" ]; then
                     for p in $disabled_list; do
                         if [ "$package" = "$p" ]; then
                             line="Priority: optional"
@@ -3850,15 +3872,26 @@ mod_initrd_debian_kali() {
     # shellcheck disable=SC2012
     kver=$(ls -d lib/modules/* | awk -F/ '{print $NF}')
 
+    # Keep partman-btrfs optional for ext4 installs. A Btrfs target keeps its
+    # advertised installer priority so preseed can request it before partitioning.
+    if [ "${filesystem:-ext4}" = btrfs ]; then
+        disabled_partman_btrfs=
+        partman_btrfs_priority=standard
+    else
+        disabled_partman_btrfs=partman-btrfs
+        partman_btrfs_priority=optional
+    fi
+
     net_retriever=usr/lib/debian-installer/retriever/net-retriever
     # shellcheck disable=SC2016
     sed -i 's,>> "$1",| change_priority >> "$1",' $net_retriever
     insert_into_file $net_retriever after '#!/bin/sh' <<EOF
+partman_btrfs_priority=$partman_btrfs_priority
 disabled_list="
 depthcharge-tools-installer
 kickseed-common
 nobootloader
-partman-btrfs
+$disabled_partman_btrfs
 partman-cros
 partman-iscsi
 partman-jfs
@@ -3946,6 +3979,60 @@ EOF
             tar xf $tmp/data.tar.xz -C $extract_dir
         fi
     }
+
+    install_btrfs_chattr_tool() {
+        local version=1.46.2-1~bpo10+2
+        local multiarch_dir package package_dir package_root package_file expected actual
+        local package_dir_root=$tmp/reinstall-btrfs-chattr
+        local private_dir=$initrd_dir/usr/local/lib/reinstall-btrfs
+
+        case "$basearch_alt" in
+        amd64) multiarch_dir=x86_64-linux-gnu ;;
+        arm64) multiarch_dir=aarch64-linux-gnu ;;
+        *) error_and_exit "Btrfs Debian Installer no-compression support is unavailable for $basearch_alt." ;;
+        esac
+
+        mkdir -p "$package_dir_root/root"
+        for package in e2fsprogs libext2fs2 libcom-err2; do
+            case "$basearch_alt:$package" in
+            amd64:e2fsprogs) expected=645cf33d95167713f479815f07dd88a135d55f3a881e409c765cc7e9a6ec5cd1 ;;
+            amd64:libext2fs2) expected=ff9f05b6b77674321b23e76ef81302e3b8696d5cd82f92d39c70f43e64ca4de7 ;;
+            amd64:libcom-err2) expected=540c451b87dacc46dcdab5fde4548d0c2d33199ed4839e019103d1c526e1fb23 ;;
+            arm64:e2fsprogs) expected=d9adec797d41a2a60869218b6f8ffe76533e2e57b1a2735b204c93ba6372b691 ;;
+            arm64:libext2fs2) expected=327565ebc5e14877282cd0363a334a7ae0c58f339c55e52c8493c66e09bf5b7b ;;
+            arm64:libcom-err2) expected=b416687f359547d8b1f8e78128217650aa6477463247f97e0876fcedc2a8b4be ;;
+            esac
+
+            package_dir=$package_dir_root/$package
+            package_root=$package_dir_root/root
+            package_file=$package_dir/${package}_${version}_${basearch_alt}.deb
+            mkdir -p "$package_dir" "$package_root"
+            curl -fL --retry 3 \
+                "https://archive.debian.org/debian/pool/main/e/e2fsprogs/${package}_${version}_${basearch_alt}.deb" \
+                -o "$package_file" || error_and_exit "Could not download the Debian Btrfs chattr helper package $package."
+            actual=$(sha256sum "$package_file" | awk '{print $1}')
+            [ "$actual" = "$expected" ] || error_and_exit "Checksum mismatch for the Debian Btrfs chattr helper package $package."
+            (
+                cd "$package_dir" || exit 1
+                ar x "$package_file" && tar xf data.tar.xz -C "$package_root"
+            ) || error_and_exit "Could not extract the Debian Btrfs chattr helper package $package."
+        done
+
+        [ -x "$package_dir_root/root/usr/bin/chattr" ] ||
+            error_and_exit "The Debian Btrfs chattr helper package did not contain chattr."
+        mkdir -p "$private_dir"
+        cp "$package_dir_root/root/usr/bin/chattr" "$private_dir/chattr"
+        cp -L "$package_dir_root/root/lib/$multiarch_dir/libe2p.so.2" "$private_dir/libe2p.so.2"
+        cp -L "$package_dir_root/root/lib/$multiarch_dir/libcom_err.so.2" "$private_dir/libcom_err.so.2"
+        chmod 755 "$private_dir/chattr"
+    }
+
+    # Debian Installer's e2fsprogs udebs omit chattr, and Debian 10's normal
+    # e2fsprogs predates FS_NOCOMP_FL support. Bundle the official Buster
+    # backport tool and its private shared libraries for the late-command.
+    if [ "${filesystem:-ext4}" = btrfs ]; then
+        install_btrfs_chattr_tool
+    fi
 
     cp_debian_kali_driver() {
         # debian 13 的 linux-image.deb 有 /usr/lib 没有 /lib
@@ -4423,7 +4510,7 @@ EOF
         # echo "wget --no-check-certificate -O- $confhome/trans.sh | /bin/ash" >\$sysroot/etc/local.d/trans.start
         # wget --no-check-certificate -O \$sysroot/etc/local.d/trans.start $confhome/trans.sh
         cp /trans.sh \$sysroot/etc/local.d/trans.start
-        cp /reinstall-cmdline.sh /reinstall-btrfs-layout.sh /windows-serialize.sh /reinstall-ssh.sh \$sysroot/
+        cp /reinstall-cmdline.sh /reinstall-btrfs-layout.sh /reinstall-grub-hook.sh /windows-serialize.sh /reinstall-ssh.sh \$sysroot/
         chmod a+x \$sysroot/etc/local.d/trans.start
         ln -s /etc/init.d/local \$sysroot/etc/runlevels/default/
 
@@ -4493,10 +4580,13 @@ This script is outdated, please download reinstall.sh again.
     curl -Lo "$initrd_dir/reinstall-cmdline.sh" "$confhome/lib/reinstall-cmdline.sh"
     curl -Lo "$initrd_dir/reinstall-network-probe.sh" "$confhome/lib/reinstall-network-probe.sh"
     curl -Lo "$initrd_dir/reinstall-btrfs-layout.sh" "$confhome/lib/reinstall-btrfs-layout.sh"
+    curl -Lo "$initrd_dir/reinstall-grub-hook.sh" "$confhome/lib/reinstall-grub-hook.sh"
     curl -Lo "$initrd_dir/windows-serialize.sh" "$confhome/lib/windows-serialize.sh"
     curl -Lo "$initrd_dir/reinstall-ssh.sh" "$confhome/lib/reinstall-ssh.sh"
     [ -s "$initrd_dir/reinstall-btrfs-layout.sh" ] ||
         error_and_exit "Downloaded pinned Btrfs layout planner is empty."
+    [ -s "$initrd_dir/reinstall-grub-hook.sh" ] ||
+        error_and_exit "Downloaded pinned GRUB update hook helper is empty."
     [ -s "$initrd_dir/reinstall-network-probe.sh" ] ||
         error_and_exit "Downloaded pinned network connectivity probe helper is empty."
     [ -s "$initrd_dir/reinstall-ssh.sh" ] ||
@@ -4959,6 +5049,13 @@ fi
 
 # 整理参数
 filesystem=ext4
+selected_target_img=
+btrfs_compression=zstd
+btrfs_compression_level=
+btrfs_options=
+btrfs_options_override=0
+btrfs_compression_set=0
+btrfs_compression_level_set=0
 ip_mode=auto
 dns_mode=auto
 dns_servers=
@@ -4986,6 +5083,9 @@ for o in ci installer debug minimal no-cloud-kernel no-auto-drivers allow-ping f
     target-disk: \
     force-boot-mode: \
     filesystem: \
+    btrfs-compression: \
+    btrfs-compression-level: \
+    btrfs-options: \
     ip-mode: \
     dns-mode: \
     dns-servers: \
@@ -5015,6 +5115,44 @@ while true; do
         ;;
     --filesystem)
         filesystem=$2
+        shift 2
+        ;;
+    --filesystem=*)
+        filesystem=${1#*=}
+        shift
+        ;;
+    --img)
+        selected_target_img=$2
+        shift 2
+        ;;
+    --btrfs-compression=*)
+        btrfs_compression=${1#*=}
+        btrfs_compression_set=1
+        shift
+        ;;
+    --btrfs-compression)
+        btrfs_compression=$2
+        btrfs_compression_set=1
+        shift 2
+        ;;
+    --btrfs-compression-level=*)
+        btrfs_compression_level=${1#*=}
+        btrfs_compression_level_set=1
+        shift
+        ;;
+    --btrfs-compression-level)
+        btrfs_compression_level=$2
+        btrfs_compression_level_set=1
+        shift 2
+        ;;
+    --btrfs-options=*)
+        btrfs_options=${1#*=}
+        btrfs_options_override=1
+        shift
+        ;;
+    --btrfs-options)
+        btrfs_options=$2
+        btrfs_options_override=1
         shift 2
         ;;
     --network-backend)
@@ -5048,14 +5186,45 @@ curl -fL "$confhome/lib/reinstall-cmdline.sh" -o "$tmp/reinstall-cmdline.sh"
 curl -fL "$confhome/lib/reinstall-alpine-initrd.sh" -o "$tmp/reinstall-alpine-initrd.sh"
 [ -s "$tmp/reinstall-alpine-initrd.sh" ] || error_and_exit "Downloaded pinned Alpine initrd helper is empty."
 . "$tmp/reinstall-alpine-initrd.sh"
-if reinstall_validate_filesystem "$filesystem" "$distro"; then
+if [ "$filesystem" = ext4 ] && {
+    [ "$btrfs_compression_set" -eq 1 ] || [ "$btrfs_compression_level_set" -eq 1 ] ||
+        [ "$btrfs_options_override" -eq 1 ];
+}; then
+    error_and_exit "Btrfs options require --filesystem=btrfs."
+fi
+if [ "$btrfs_options_override" -eq 1 ] && {
+    [ "$btrfs_compression_set" -eq 1 ] || [ "$btrfs_compression_level_set" -eq 1 ];
+}; then
+    error_and_exit "--btrfs-options cannot be combined with --btrfs-compression or --btrfs-compression-level."
+fi
+if reinstall_validate_filesystem "$filesystem" "$distro" "$releasever"; then
     :
 else
     filesystem_status=$?
     case "$filesystem_status" in
     1) error_and_exit "Invalid --filesystem value: $filesystem (expected ext4 or btrfs)." ;;
-    2) error_and_exit "--filesystem=btrfs is supported only for Arch, Gentoo, NixOS, and AOSC." ;;
+    2) error_and_exit "--filesystem=btrfs is unsupported for $distro $releasever." ;;
     esac
+fi
+if [ "$filesystem" = btrfs ]; then
+    if [ "$distro" = oracle ] && [ -n "$selected_target_img" ]; then
+        error_and_exit "Btrfs on Oracle Linux requires the project-selected UEK image; custom --img kernels cannot be verified."
+    fi
+    target_kernel_variant=$(reinstall_btrfs_default_kernel_variant "$distro" "$releasever") ||
+        error_and_exit "No Btrfs-capable target kernel route is defined for $distro $releasever."
+    if btrfs_root_options=$(reinstall_btrfs_validate_mount_options \
+        "$distro" "$releasever" "$target_kernel_variant" \
+        "$btrfs_compression" "$btrfs_compression_level" \
+        "$btrfs_options" "$btrfs_options_override"); then
+        echo "CHECKPOINT btrfs/options-preflight: distro=$distro release=$releasever kernel=$target_kernel_variant options=${btrfs_root_options:-none}"
+    else
+        btrfs_options_status=$?
+        case "$btrfs_options_status" in
+        1) error_and_exit "Invalid or conflicting Btrfs compression/options configuration." ;;
+        2) error_and_exit "The selected Btrfs compression/options are unsupported by the target kernel route for $distro $releasever ($target_kernel_variant). Choose explicit compatible options." ;;
+        *) error_and_exit "Could not validate the Btrfs target configuration." ;;
+        esac
+    fi
 fi
 if ! reinstall_network_validate_backend_option "$network_backend"; then
     error_and_exit "Invalid --network-backend value: $network_backend (expected auto, systemd-networkd, or NetworkManager)."
@@ -5096,6 +5265,40 @@ while true; do
         ;;
     --filesystem)
         filesystem=$2
+        shift 2
+        ;;
+    --filesystem=*)
+        filesystem=${1#*=}
+        shift
+        ;;
+    --btrfs-compression=*)
+        btrfs_compression=${1#*=}
+        btrfs_compression_set=1
+        shift
+        ;;
+    --btrfs-compression)
+        btrfs_compression=$2
+        btrfs_compression_set=1
+        shift 2
+        ;;
+    --btrfs-compression-level=*)
+        btrfs_compression_level=${1#*=}
+        btrfs_compression_level_set=1
+        shift
+        ;;
+    --btrfs-compression-level)
+        btrfs_compression_level=$2
+        btrfs_compression_level_set=1
+        shift 2
+        ;;
+    --btrfs-options=*)
+        btrfs_options=${1#*=}
+        btrfs_options_override=1
+        shift
+        ;;
+    --btrfs-options)
+        btrfs_options=$2
+        btrfs_options_override=1
         shift 2
         ;;
     --ip-mode | --dns-mode | --dns-servers | --network-backend)

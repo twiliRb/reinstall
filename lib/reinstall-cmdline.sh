@@ -814,17 +814,369 @@ reinstall_cmdline_bootloader_disk() {
 # Return 1 for an unknown filesystem value and 2 when Btrfs is unavailable for
 # the selected distro. ext4 remains the default on every existing path.
 reinstall_validate_filesystem() {
-    local _reinstall_filesystem=$1 _reinstall_distro=$2
+    local _reinstall_filesystem=$1 _reinstall_distro=$2 _reinstall_releasever=${3-}
     case "$_reinstall_filesystem" in
     ext4) return 0 ;;
     btrfs)
-        case "$_reinstall_distro" in
-        arch | gentoo | nixos | aosc) return 0 ;;
-        *) return 2 ;;
-        esac
+        reinstall_btrfs_target_supported "$_reinstall_distro" "$_reinstall_releasever" || return 2
         ;;
     *) return 1 ;;
     esac
+}
+
+# Internal kernel flavor selected by each project's install route. Oracle is
+# admitted only through an explicitly UEK-backed route; other targets use the
+# distro adapter's standard kernel choice.
+reinstall_btrfs_default_kernel_variant() {
+    [ "$#" -ge 1 ] || return 2
+    case $1 in
+    oracle) printf '%s\n' uek ;;
+    arch | gentoo | nixos | aosc | fedora | debian | kali | opensuse | alpine | ubuntu | almalinux)
+        printf '%s\n' default
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+# Approved Btrfs-root target matrix. A bare AlmaLinux 10 selector resolves to
+# the current 10.x image; an explicit minor release must be 10.2 or newer.
+reinstall_btrfs_target_supported() {
+    [ "$#" -ge 1 ] || return 2
+    local _reinstall_distro=$1 _reinstall_releasever=${2-}
+    if [ -z "$_reinstall_releasever" ]; then
+        case $_reinstall_distro in
+        nixos) _reinstall_releasever=26.05 ;;
+        fedora) _reinstall_releasever=44 ;;
+        debian) _reinstall_releasever=13 ;;
+        kali) _reinstall_releasever=rolling ;;
+        opensuse) _reinstall_releasever=tumbleweed ;;
+        alpine) _reinstall_releasever=3.24 ;;
+        ubuntu) _reinstall_releasever=26.04 ;;
+        oracle) _reinstall_releasever=10 ;;
+        almalinux) _reinstall_releasever=10 ;;
+        esac
+    fi
+    case $_reinstall_distro:$_reinstall_releasever in
+    arch: | gentoo: | aosc:) return 0 ;;
+    nixos:26.05) return 0 ;;
+    fedora:43 | fedora:44) return 0 ;;
+    debian:10 | debian:11 | debian:12 | debian:13) return 0 ;;
+    kali:rolling | kali:last-snapshot) return 0 ;;
+    opensuse:16.0 | opensuse:tumbleweed) return 0 ;;
+    alpine:3.21 | alpine:3.22 | alpine:3.23 | alpine:3.24) return 0 ;;
+    ubuntu:18.04 | ubuntu:20.04 | ubuntu:22.04 | ubuntu:24.04 | ubuntu:26.04) return 0 ;;
+    oracle:8 | oracle:9 | oracle:10) return 0 ;;
+    almalinux:10) return 0 ;;
+    almalinux:10.*)
+        printf '%s\n' "$_reinstall_releasever" | awk -F. '
+            NF == 2 && $1 == 10 && $2 ~ /^[0-9]+$/ && $2 >= 2 { ok = 1 }
+            END { exit !ok }
+        '
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+# Conservative kernel baseline for each supported install route. This is
+# intentionally independent of the live installer's running kernel.
+reinstall_btrfs_target_kernel_baseline() {
+    [ "$#" -eq 3 ] || return 2
+    local _reinstall_distro=$1 _reinstall_releasever=$2 _reinstall_variant=$3
+    if [ -z "$_reinstall_releasever" ]; then
+        case $_reinstall_distro in
+        nixos) _reinstall_releasever=26.05 ;;
+        fedora) _reinstall_releasever=44 ;;
+        debian) _reinstall_releasever=13 ;;
+        kali) _reinstall_releasever=rolling ;;
+        opensuse) _reinstall_releasever=tumbleweed ;;
+        alpine) _reinstall_releasever=3.24 ;;
+        ubuntu) _reinstall_releasever=26.04 ;;
+        oracle) _reinstall_releasever=10 ;;
+        almalinux) _reinstall_releasever=10 ;;
+        esac
+    fi
+    reinstall_btrfs_target_supported "$_reinstall_distro" "$_reinstall_releasever" || return 1
+    case $_reinstall_distro:$_reinstall_variant:$_reinstall_releasever in
+    oracle:uek:8) printf '%s\n' 5.4 ;;
+    oracle:uek:9) printf '%s\n' 5.15 ;;
+    oracle:uek:10) printf '%s\n' 6.12 ;;
+    oracle:*) return 1 ;;
+    arch:default:) printf '%s\n' 6.15 ;;
+    gentoo:default:) printf '%s\n' 6.1 ;;
+    aosc:default:) printf '%s\n' 6.12 ;;
+    nixos:default:26.05) printf '%s\n' 6.12 ;;
+    fedora:default:43 | fedora:default:44) printf '%s\n' 6.15 ;;
+    debian:default:10) printf '%s\n' 4.19 ;;
+    debian:default:11) printf '%s\n' 5.10 ;;
+    debian:default:12) printf '%s\n' 6.1 ;;
+    debian:default:13) printf '%s\n' 6.12 ;;
+    kali:default:rolling | kali:default:last-snapshot) printf '%s\n' 6.1 ;;
+    opensuse:default:16.0) printf '%s\n' 6.12 ;;
+    opensuse:default:tumbleweed) printf '%s\n' 6.12 ;;
+    alpine:default:*) printf '%s\n' 6.12 ;;
+    ubuntu:default:18.04) printf '%s\n' 4.15 ;;
+    ubuntu:default:20.04) printf '%s\n' 5.4 ;;
+    ubuntu:default:22.04) printf '%s\n' 5.15 ;;
+    ubuntu:default:24.04) printf '%s\n' 6.8 ;;
+    ubuntu:default:26.04) printf '%s\n' 6.12 ;;
+    almalinux:default:10 | almalinux:default:10.*) printf '%s\n' 6.12 ;;
+    *) return 1 ;;
+    esac
+}
+
+# Validate the target identity carried into installer initrds. Keep this
+# separate from the machine's distro identity: Debian preseed, Kickstart and
+# manual adapters need to know which system is being installed.
+reinstall_btrfs_validate_serialized_target() {
+    [ -n "${btrfs_target_distro:-}" ] && [ -n "${btrfs_target_kernel_variant:-}" ] || return 1
+    reinstall_btrfs_target_kernel_baseline \
+        "$btrfs_target_distro" "${btrfs_target_releasever:-}" \
+        "$btrfs_target_kernel_variant" >/dev/null
+}
+
+reinstall_btrfs_kernel_at_least() {
+    [ "$#" -eq 2 ] || return 1
+    printf '%s\n%s\n' "$1" "$2" | awk -F. '
+        NR == 1 { a_major = $1 + 0; a_minor = $2 + 0 }
+        NR == 2 { b_major = $1 + 0; b_minor = $2 + 0 }
+        END { exit !(a_major > b_major || (a_major == b_major && a_minor >= b_minor)) }
+    '
+}
+
+reinstall_btrfs_kernel_before() {
+    [ "$#" -eq 2 ] || return 1
+    printf '%s\n%s\n' "$1" "$2" | awk -F. '
+        NR == 1 { a_major = $1 + 0; a_minor = $2 + 0 }
+        NR == 2 { b_major = $1 + 0; b_minor = $2 + 0 }
+        END { exit !(a_major < b_major || (a_major == b_major && a_minor < b_minor)) }
+    '
+}
+
+# Validate and normalize a single compress= mount option. Return status 2 when
+# the syntax is valid but the target baseline does not provide that capability.
+reinstall_btrfs_validate_compress_option() {
+    [ "$#" -eq 2 ] || return 1
+    local _reinstall_value=$1 _reinstall_kernel=$2 _reinstall_algo _reinstall_level=
+    local _reinstall_abs_level
+    case $_reinstall_value in
+    no) return 0 ;;
+    *:*)
+        _reinstall_algo=${_reinstall_value%%:*}
+        _reinstall_level=${_reinstall_value#*:}
+        case $_reinstall_level in
+        '' | *:*) return 1 ;;
+        -*)
+            _reinstall_abs_level=${_reinstall_level#-}
+            case $_reinstall_abs_level in '' | *[!0123456789]*) return 1 ;; esac
+            ;;
+        *) case $_reinstall_level in *[!0123456789]*) return 1 ;; esac ;;
+        esac
+        ;;
+    *) _reinstall_algo=$_reinstall_value ;;
+    esac
+    case $_reinstall_algo in zstd | zlib | lzo) ;; *) return 1 ;; esac
+
+    if [ -n "$_reinstall_level" ] && [ "$_reinstall_level" != 0 ]; then
+        case $_reinstall_algo in
+        lzo) return 1 ;;
+        zlib)
+            case $_reinstall_level in [1-9]) ;; *) return 1 ;; esac
+            reinstall_btrfs_kernel_at_least "$_reinstall_kernel" 4.14 || return 2
+            ;;
+        zstd)
+            case $_reinstall_level in
+            -* )
+                _reinstall_abs_level=${_reinstall_level#-}
+                case $_reinstall_abs_level in [1-9] | 1[0-5]) ;; *) return 1 ;; esac
+                reinstall_btrfs_kernel_at_least "$_reinstall_kernel" 6.15 || return 2
+                ;;
+            *)
+                case $_reinstall_level in [1-9] | 1[0-5]) ;; *) return 1 ;; esac
+                reinstall_btrfs_kernel_at_least "$_reinstall_kernel" 5.1 || return 2
+                ;;
+            esac
+            ;;
+        esac
+    else
+        case $_reinstall_algo in
+        zstd | zlib) reinstall_btrfs_kernel_at_least "$_reinstall_kernel" 4.14 || return 2 ;;
+        esac
+        _reinstall_level=
+    fi
+    if [ -n "$_reinstall_level" ]; then
+        printf 'compress=%s:%s\n' "$_reinstall_algo" "$_reinstall_level"
+    else
+        printf 'compress=%s\n' "$_reinstall_algo"
+    fi
+}
+
+# Validate a conservative root-safe subset of Btrfs and VFS mount options.
+# Subvolume/device selection is owned by the layout code. Output is a normalized
+# comma-separated list, with `defaults`/`compress=no` represented by omission.
+reinstall_btrfs_validate_option_list() {
+    [ "$#" -eq 2 ] || return 1
+    local _reinstall_options=$1 _reinstall_kernel=$2
+    local _reinstall_old_ifs=$IFS _reinstall_token _reinstall_normalized='' _reinstall_seen=''
+    local _reinstall_compress_count=0 _reinstall_compress='' _reinstall_option_value _reinstall_status
+    local _reinstall_has_nodatacow=0 _reinstall_has_nodatasum=0
+    local _reinstall_has_datacow=0 _reinstall_has_datasum=0
+    local _reinstall_has_rw=0 _reinstall_atime_mode=
+    local _reinstall_discard_mode= _reinstall_option_group= _reinstall_seen_groups=
+    case $_reinstall_options in
+    '' | ,* | *, | *,,* | *[!A-Za-z0-9_,=./:-]*) return 1 ;;
+    esac
+    IFS=,
+    for _reinstall_token in $_reinstall_options; do
+        [ -n "$_reinstall_token" ] || { IFS=$_reinstall_old_ifs; return 1; }
+        case " $_reinstall_seen " in *" $_reinstall_token "*) IFS=$_reinstall_old_ifs; return 1 ;; esac
+        _reinstall_seen="$_reinstall_seen $_reinstall_token"
+        _reinstall_option_group=
+        case $_reinstall_token in
+        acl | noacl) _reinstall_option_group=acl ;;
+        autodefrag | noautodefrag) _reinstall_option_group=autodefrag ;;
+        commit=*) _reinstall_option_group=commit ;;
+        dev | nodev) _reinstall_option_group=dev ;;
+        exec | noexec) _reinstall_option_group=exec ;;
+        fatal_errors=*) _reinstall_option_group=fatal_errors ;;
+        flushoncommit | noflushoncommit) _reinstall_option_group=flushoncommit ;;
+        inode_cache | noinode_cache) _reinstall_option_group=inode_cache ;;
+        lazytime | nolazytime) _reinstall_option_group=lazytime ;;
+        max_inline=*) _reinstall_option_group=max_inline ;;
+        space_cache | space_cache=v1 | space_cache=v2 | nospace_cache) _reinstall_option_group=space_cache ;;
+        ssd | nossd) _reinstall_option_group=ssd ;;
+        ssd_spread | nossd_spread) _reinstall_option_group=ssd_spread ;;
+        suid | nosuid) _reinstall_option_group=suid ;;
+        sync | async) _reinstall_option_group=sync ;;
+        thread_pool=*) _reinstall_option_group=thread_pool ;;
+        verbosity=*) _reinstall_option_group=verbosity ;;
+        esac
+        if [ -n "$_reinstall_option_group" ]; then
+            case " $_reinstall_seen_groups " in
+            *" $_reinstall_option_group "*) IFS=$_reinstall_old_ifs; return 1 ;;
+            esac
+            _reinstall_seen_groups="$_reinstall_seen_groups $_reinstall_option_group"
+        fi
+        case $_reinstall_token in
+        compress-force | compress-force=*) IFS=$_reinstall_old_ifs; return 1 ;;
+        compress=*)
+            _reinstall_compress_count=$((_reinstall_compress_count + 1))
+            [ "$_reinstall_compress_count" -eq 1 ] || { IFS=$_reinstall_old_ifs; return 1; }
+            _reinstall_option_value=${_reinstall_token#compress=}
+            _reinstall_compress=$(reinstall_btrfs_validate_compress_option \
+                "$_reinstall_option_value" "$_reinstall_kernel")
+            _reinstall_status=$?
+            [ "$_reinstall_status" -eq 0 ] || { IFS=$_reinstall_old_ifs; return "$_reinstall_status"; }
+            ;;
+        compress) IFS=$_reinstall_old_ifs; return 1 ;;
+        inode_cache | noinode_cache)
+            reinstall_btrfs_kernel_before "$_reinstall_kernel" 5.11 || { IFS=$_reinstall_old_ifs; return 2; }
+            ;;
+        nodatacow) _reinstall_has_nodatacow=1 ;;
+        nodatasum) _reinstall_has_nodatasum=1 ;;
+        datacow) _reinstall_has_datacow=1 ;;
+        datasum) _reinstall_has_datasum=1 ;;
+        ro) IFS=$_reinstall_old_ifs; return 1 ;;
+        rw) _reinstall_has_rw=1 ;;
+        atime | noatime | relatime | strictatime)
+            [ -z "$_reinstall_atime_mode" ] || { IFS=$_reinstall_old_ifs; return 1; }
+            _reinstall_atime_mode=$_reinstall_token
+            ;;
+        discard | discard=sync | discard=async | nodiscard)
+            [ -z "$_reinstall_discard_mode" ] || { IFS=$_reinstall_old_ifs; return 1; }
+            _reinstall_discard_mode=$_reinstall_token
+            if [ "$_reinstall_token" = discard=async ]; then
+                reinstall_btrfs_kernel_at_least "$_reinstall_kernel" 5.6 || { IFS=$_reinstall_old_ifs; return 2; }
+            fi
+            ;;
+        space_cache=v2)
+            reinstall_btrfs_kernel_at_least "$_reinstall_kernel" 4.5 || { IFS=$_reinstall_old_ifs; return 2; }
+            ;;
+        acl | noacl | autodefrag | noautodefrag | clear_cache | degraded | flushoncommit | \
+            noflushoncommit | space_cache | space_cache=v1 | nospace_cache | \
+            ssd | nossd | ssd_spread | nossd_spread | user_subvol_rm_allowed | \
+            recovery | skip_balance | rescan_uuid_tree | defaults | \
+            nodiratime | lazytime | nolazytime | dirsync | sync | async | dev | nodev | \
+            exec | noexec | suid | nosuid)
+            ;;
+        commit=* | max_inline=* | thread_pool=* | verbosity=*)
+            _reinstall_option_value=${_reinstall_token#*=}
+            case $_reinstall_option_value in '' | *[!0123456789]*) IFS=$_reinstall_old_ifs; return 1 ;; esac
+            ;;
+        fatal_errors=bug | fatal_errors=panic) ;;
+        subvol=* | subvolid=* | device=* | device) IFS=$_reinstall_old_ifs; return 1 ;;
+        *) IFS=$_reinstall_old_ifs; return 1 ;;
+        esac
+
+        case $_reinstall_token in defaults | compress=no) continue ;; esac
+        case $_reinstall_token in compress=*) _reinstall_token=$_reinstall_compress ;; esac
+        if [ -n "$_reinstall_token" ]; then
+            if [ -n "$_reinstall_normalized" ]; then
+                _reinstall_normalized="$_reinstall_normalized,$_reinstall_token"
+            else
+                _reinstall_normalized=$_reinstall_token
+            fi
+        fi
+    done
+    IFS=$_reinstall_old_ifs
+
+    if [ "$_reinstall_has_nodatacow" -eq 1 ] && [ "$_reinstall_has_datacow" -eq 1 ]; then return 1; fi
+    if [ "$_reinstall_has_nodatasum" -eq 1 ] && [ "$_reinstall_has_datasum" -eq 1 ]; then return 1; fi
+    if [ "$_reinstall_has_nodatacow" -eq 1 ] && [ "$_reinstall_has_datasum" -eq 1 ]; then return 1; fi
+    case " $_reinstall_seen " in
+    *" nossd "*) case " $_reinstall_seen " in *" ssd_spread "*) return 1 ;; esac ;;
+    esac
+    if [ "$_reinstall_compress_count" -gt 0 ] && [ -n "$_reinstall_compress" ] && \
+        { [ "$_reinstall_has_nodatacow" -eq 1 ] || [ "$_reinstall_has_nodatasum" -eq 1 ]; }; then
+        return 1
+    fi
+    printf '%s\n' "$_reinstall_normalized"
+}
+
+# Resolve the Btrfs options passed to mount, fstab, rootflags and the planner.
+# Args: distro releasever kernel_variant compression level generic_options override.
+# Return 1 for malformed/incompatible options and 2 for unsupported target/kernel.
+reinstall_btrfs_validate_mount_options() {
+    [ "$#" -eq 7 ] || return 1
+    local _reinstall_distro=$1 _reinstall_releasever=$2 _reinstall_variant=$3
+    local _reinstall_compression=$4 _reinstall_level=$5 _reinstall_options=$6 _reinstall_override=$7
+    local _reinstall_kernel _reinstall_compress_option _reinstall_status _reinstall_level_abs
+    _reinstall_kernel=$(reinstall_btrfs_target_kernel_baseline \
+        "$_reinstall_distro" "$_reinstall_releasever" "$_reinstall_variant") || return 2
+    case $_reinstall_override in
+    true | 1)
+        [ -n "$_reinstall_options" ] || return 1
+        reinstall_btrfs_validate_option_list "$_reinstall_options" "$_reinstall_kernel"
+        return $?
+        ;;
+    false | 0) [ -z "$_reinstall_options" ] || return 1 ;;
+    *) return 1 ;;
+    esac
+    case $_reinstall_compression in zstd | zlib | lzo | none) ;; *) return 1 ;; esac
+    case $_reinstall_level in
+    '' | 0) _reinstall_level=0 ;;
+    -*)
+        _reinstall_level_abs=${_reinstall_level#-}
+        case $_reinstall_level_abs in '' | *[!0123456789]*) return 1 ;; esac
+        ;;
+    *) case $_reinstall_level in *[!0123456789]*) return 1 ;; esac ;;
+    esac
+    case $_reinstall_compression:$_reinstall_level in
+    none:0) _reinstall_compress_option= ;;
+    lzo:0) _reinstall_compress_option=compress=lzo ;;
+    lzo:*) return 1 ;;
+    none:*) return 1 ;;
+    zlib:0) _reinstall_compress_option=compress=zlib ;;
+    zstd:0) _reinstall_compress_option=compress=zstd ;;
+    zlib:*) _reinstall_compress_option="compress=zlib:$_reinstall_level" ;;
+    zstd:*) _reinstall_compress_option="compress=zstd:$_reinstall_level" ;;
+    esac
+    if [ -n "$_reinstall_compress_option" ]; then
+        _reinstall_compress_option=$(reinstall_btrfs_validate_compress_option \
+            "${_reinstall_compress_option#compress=}" "$_reinstall_kernel")
+        _reinstall_status=$?
+        [ "$_reinstall_status" -eq 0 ] || return "$_reinstall_status"
+    fi
+    printf '%s\n' "$_reinstall_compress_option"
 }
 
 # Parse the first line emitted by `mke2fs -V`. The executable name contains a
@@ -910,6 +1262,8 @@ reinstall_cmdline_apply_token() {
         finalos_modloop | finalos_releasever | finalos_repo | finalos_squashfs | \
         finalos_udeb_mirror | finalos_vmlinuz | \
         extra_addrs | extra_allow_ping | extra_cloud_image | extra_confhome | extra_deb_mirror | \
+        extra_btrfs_compression | extra_btrfs_compression_level | extra_btrfs_options | \
+        extra_btrfs_target_distro | extra_btrfs_target_releasever | extra_btrfs_target_kernel_variant | \
         extra_dns_mode | extra_dns_servers | extra_elts | extra_force_boot_mode | extra_force_cn | extra_force_old_windows_setup | \
         extra_hold | extra_kernel | extra_link_grub_dir | extra_localtest | extra_main_disk | \
         extra_filesystem | extra_ip_mode | extra_mirrorlist | extra_network_backend | extra_no_auto_drivers | extra_no_cloud_kernel | extra_rdp_port | \
@@ -929,6 +1283,39 @@ reinstall_cmdline_apply_token() {
         ;;
     extra_addrs) addrs=$_reinstall_value ;;
     extra_allow_ping) allow_ping=$_reinstall_value ;;
+    extra_btrfs_compression)
+        case ${btrfs_options_override:-0} in 1 | true) return 1 ;; esac
+        btrfs_compression=$_reinstall_value
+        btrfs_compression_set=1
+        ;;
+    extra_btrfs_compression_level)
+        case ${btrfs_options_override:-0} in 1 | true) return 1 ;; esac
+        btrfs_compression_level=$_reinstall_value
+        btrfs_compression_level_set=1
+        ;;
+    extra_btrfs_options)
+        case ${btrfs_compression_set:-0}:${btrfs_compression_level_set:-0} in
+        0:0 | false:false | false:0 | 0:false) ;;
+        *) return 1 ;;
+        esac
+        btrfs_options=$_reinstall_value
+        btrfs_options_override=1
+        ;;
+    extra_btrfs_target_distro)
+        case $_reinstall_value in
+        arch | gentoo | nixos | aosc | fedora | debian | kali | opensuse | alpine | ubuntu | oracle | almalinux) ;;
+        *) return 1 ;;
+        esac
+        btrfs_target_distro=$_reinstall_value
+        ;;
+    extra_btrfs_target_releasever)
+        case $_reinstall_value in '' | *[!A-Za-z0-9.-]*) return 1 ;; esac
+        btrfs_target_releasever=$_reinstall_value
+        ;;
+    extra_btrfs_target_kernel_variant)
+        case $_reinstall_value in default | uek) ;; *) return 1 ;; esac
+        btrfs_target_kernel_variant=$_reinstall_value
+        ;;
     extra_cloud_image) cloud_image=$_reinstall_value ;;
     extra_deb_mirror) deb_mirror=$_reinstall_value ;;
     extra_dns_mode) dns_mode=$_reinstall_value ;;
@@ -1015,6 +1402,11 @@ EOF
         done
         IFS=$_reinstall_old_ifs
         [ "$_reinstall_restore_globbing" -eq 0 ] || set +f
+    fi
+
+    if [ -n "${btrfs_target_distro:-}" ] || [ -n "${btrfs_target_kernel_variant:-}" ] ||
+        [ -n "${btrfs_target_releasever:-}" ]; then
+        reinstall_btrfs_validate_serialized_target || return 1
     fi
 }
 

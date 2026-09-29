@@ -16,14 +16,30 @@ reinstall_cmdline_select_target_disk /dev/vdb
 printf 'CHECKPOINT cmdline/target-disk: selected=%s bootloader=%s cached-source-id=cleared\n' \
     "$xda" "$(reinstall_cmdline_bootloader_disk)"
 
-# The optional filesystem selector defaults to ext4, while Btrfs is limited to
-# the install paths that know how to configure its root and boot subvolumes.
+# The optional filesystem selector defaults to ext4. Btrfs is limited to
+# verified root-boot targets and version/kernel-aware mount options.
 reinstall_validate_filesystem ext4 arch
 reinstall_validate_filesystem btrfs arch
 reinstall_validate_filesystem btrfs gentoo
 reinstall_validate_filesystem btrfs nixos
 reinstall_validate_filesystem btrfs aosc
-if reinstall_validate_filesystem btrfs debian; then
+for target in \
+    'fedora 43' 'fedora 44' 'debian 10' 'debian 11' 'debian 12' 'debian 13' \
+    'kali rolling' 'kali last-snapshot' 'opensuse 16.0' 'opensuse tumbleweed' \
+    'alpine 3.21' 'alpine 3.22' 'alpine 3.23' 'alpine 3.24' \
+    'ubuntu 18.04' 'ubuntu 20.04' 'ubuntu 22.04' 'ubuntu 24.04' 'ubuntu 26.04' \
+    'oracle 8' 'oracle 9' 'oracle 10' 'almalinux 10' 'almalinux 10.2'; do
+    read -r target_distro target_release <<<"$target"
+    reinstall_validate_filesystem btrfs "$target_distro" "$target_release"
+done
+for target in 'debian 9' 'almalinux 10.1' 'oracle 7' 'centos 9' 'anolis 23'; do
+    read -r target_distro target_release <<<"$target"
+    if reinstall_validate_filesystem btrfs "$target_distro" "$target_release"; then
+        printf 'accepted Btrfs on an unsupported distro/release: %s\n' "$target" >&2
+        exit 1
+    fi
+done
+if reinstall_validate_filesystem btrfs debian 9; then
     printf 'accepted Btrfs on an unsupported distro\n' >&2
     exit 1
 else
@@ -51,7 +67,95 @@ mke2fs_output=$'mke2fs 1.47.4 (5-Feb-2023)\nUsing EXT2FS Library version 1.47.4'
 mke2fs_old_output='mke2fs 1.46.2 (28-Feb-2021)'
 [[ "$(reinstall_e2fsprogs_version_from_mke2fs_output "$mke2fs_old_output")" == 1.46.2 ]]
 [[ -z "$(reinstall_e2fsprogs_version_from_mke2fs_output 'not mke2fs version output')" ]]
-printf 'CHECKPOINT cmdline/filesystem-policy: default=ext4 btrfs=arch, gentoo, nixos, aosc nocompress-min=1.46.2\n'
+[[ "$(reinstall_btrfs_default_kernel_variant oracle 10)" == uek ]]
+[[ "$(reinstall_btrfs_default_kernel_variant debian 13)" == default ]]
+[[ "$(reinstall_btrfs_target_kernel_baseline oracle 9 uek)" == 5.15 ]]
+if reinstall_btrfs_target_kernel_baseline oracle 9 default; then
+    printf 'accepted non-UEK Oracle Btrfs target\n' >&2
+    exit 1
+fi
+
+[[ "$(reinstall_btrfs_validate_mount_options debian 10 default zstd '' '' 0)" == compress=zstd ]]
+[[ "$(reinstall_btrfs_validate_mount_options debian 10 default zlib 9 '' 0)" == compress=zlib:9 ]]
+[[ "$(reinstall_btrfs_validate_mount_options debian 10 default zstd 0 '' 0)" == compress=zstd ]]
+[[ -z "$(reinstall_btrfs_validate_mount_options debian 10 default none '' '' 0)" ]]
+[[ "$(reinstall_btrfs_validate_mount_options debian 10 default lzo 0 '' 0)" == compress=lzo ]]
+[[ "$(reinstall_btrfs_validate_mount_options debian 13 default zstd '' 'noatime' 1)" == noatime ]]
+[[ "$(reinstall_btrfs_validate_mount_options debian 13 default zstd '' 'compress=no,noatime' 1)" == noatime ]]
+[[ "$(reinstall_btrfs_validate_mount_options debian 11 default zstd 15 '' 0)" == compress=zstd:15 ]]
+[[ "$(reinstall_btrfs_validate_mount_options arch '' default zstd -15 '' 0)" == compress=zstd:-15 ]]
+for invalid in \
+    'debian 10 default zstd 1' \
+    'debian 10 default zstd -1' \
+    'debian 10 default lzo 1' \
+    'debian 10 default none 1' \
+    'debian 10 default zlib 10' \
+    'debian 10 default zstd 16' \
+    'oracle 9 default zstd 0'; do
+    read -r invalid_distro invalid_release invalid_variant invalid_compression invalid_level <<<"$invalid"
+    if reinstall_btrfs_validate_mount_options "$invalid_distro" "$invalid_release" \
+        "$invalid_variant" "$invalid_compression" "$invalid_level" '' 0; then
+        printf 'accepted invalid/incompatible Btrfs config: %s\n' "$invalid" >&2
+        exit 1
+    fi
+done
+if reinstall_btrfs_validate_mount_options debian 10 default zstd '' 'unknown_option' 1; then
+    printf 'accepted an unknown generic Btrfs option\n' >&2
+    exit 1
+fi
+if reinstall_btrfs_validate_mount_options arch '' default zstd '' 'compress-force=zstd' 1; then
+    printf 'accepted compress-force\n' >&2
+    exit 1
+fi
+if reinstall_btrfs_validate_mount_options arch '' default zstd '' 'ro' 1; then
+    printf 'accepted a read-only root override\n' >&2
+    exit 1
+fi
+if reinstall_btrfs_validate_mount_options arch '' default zstd '' 'compress=zstd,nodatacow' 1; then
+    printf 'accepted compression with nodatacow\n' >&2
+    exit 1
+fi
+if reinstall_btrfs_validate_mount_options arch '' default zstd '' 'compress=zstd,nodatasum' 1; then
+    printf 'accepted compression with nodatasum\n' >&2
+    exit 1
+fi
+if reinstall_btrfs_validate_mount_options debian 10 default zstd '' 'discard=async' 1; then
+    printf 'accepted a target-unsupported discard mode\n' >&2
+    exit 1
+fi
+[[ "$(reinstall_btrfs_validate_mount_options debian 10 default zstd '' 'space_cache=v2' 1)" == space_cache=v2 ]]
+[[ "$(reinstall_btrfs_validate_mount_options debian 10 default zstd '' inode_cache 1)" == inode_cache ]]
+if reinstall_btrfs_validate_mount_options debian 12 default zstd '' inode_cache 1; then
+    printf 'accepted removed inode_cache on a new target kernel\n' >&2
+    exit 1
+else
+    [[ $? == 2 ]]
+fi
+if reinstall_btrfs_validate_mount_options arch '' default zstd '' usebackuproot 1; then
+    printf 'accepted removed usebackuproot on an unbounded rolling kernel\n' >&2
+    exit 1
+fi
+for discard_conflict in 'discard,nodiscard' 'nodiscard,discard=async'; do
+    if reinstall_btrfs_validate_mount_options arch '' default zstd '' "$discard_conflict" 1; then
+        printf 'accepted conflicting discard options: %s\n' "$discard_conflict" >&2
+        exit 1
+    fi
+done
+for option_conflict in \
+    'acl,noacl' 'autodefrag,noautodefrag' 'commit=30,commit=60' \
+    'dev,nodev' 'exec,noexec' 'fatal_errors=bug,fatal_errors=panic' \
+    'flushoncommit,noflushoncommit' 'lazytime,nolazytime' \
+    'max_inline=4096,max_inline=8192' 'space_cache=v1,space_cache=v2' \
+    'ssd,nossd' 'ssd_spread,nossd_spread' 'nossd,ssd_spread' \
+    'suid,nosuid' 'sync,async' 'thread_pool=4,thread_pool=8' \
+    'verbosity=1,verbosity=2' 'nodatacow,datasum'; do
+    if reinstall_btrfs_validate_mount_options arch '' default zstd '' "$option_conflict" 1; then
+        printf 'accepted conflicting Btrfs mount options: %s\n' "$option_conflict" >&2
+        exit 1
+    fi
+done
+[[ "$(reinstall_btrfs_validate_mount_options arch '' default zstd '' 'defaults,noatime,compress=zstd:0' 1)" == noatime,compress=zstd ]]
+printf 'CHECKPOINT cmdline/filesystem-policy: distro matrix, target kernel gates, compression and override validation passed\n'
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -65,12 +169,23 @@ source_sha=0123456789abcdef0123456789abcdef01234567
 confhome_arg=$(reinstall_cmdline_serialize extra_confhome \
     "https://raw.githubusercontent.com/twiliRb/reinstall/$source_sha")
 filesystem_arg=$(reinstall_cmdline_serialize extra_filesystem btrfs)
-printf '%s\n' "root=/dev/vda $username_arg $port_arg $confhome_arg $filesystem_arg" >"$tmpdir/cmdline"
+btrfs_target_distro_arg=$(reinstall_cmdline_serialize extra_btrfs_target_distro debian)
+btrfs_target_releasever_arg=$(reinstall_cmdline_serialize extra_btrfs_target_releasever 13)
+btrfs_target_variant_arg=$(reinstall_cmdline_serialize extra_btrfs_target_kernel_variant default)
+btrfs_compression_arg=$(reinstall_cmdline_serialize extra_btrfs_compression zstd)
+btrfs_level_arg=$(reinstall_cmdline_serialize extra_btrfs_compression_level -15)
+printf '%s\n' "root=/dev/vda $username_arg $port_arg $confhome_arg $filesystem_arg $btrfs_target_distro_arg $btrfs_target_releasever_arg $btrfs_target_variant_arg $btrfs_compression_arg $btrfs_level_arg" >"$tmpdir/cmdline"
 
 username=
 ssh_port=
 confhome=
 filesystem=ext4
+btrfs_compression=zlib
+btrfs_compression_level=0
+btrfs_options=
+btrfs_options_override=0
+btrfs_compression_set=0
+btrfs_compression_level_set=0
 [[ "$filesystem" == ext4 ]]
 reinstall_cmdline_load_file "$tmpdir/cmdline" extra
 
@@ -81,6 +196,60 @@ fi
 [[ "$ssh_port" == 2222 ]]
 [[ "$confhome" == "https://raw.githubusercontent.com/twiliRb/reinstall/$source_sha" ]]
 [[ "$filesystem" == btrfs ]]
+[[ "$btrfs_target_distro" == debian ]]
+[[ "$btrfs_target_releasever" == 13 ]]
+[[ "$btrfs_target_kernel_variant" == default ]]
+[[ "$btrfs_compression" == zstd ]]
+[[ "$btrfs_compression_level" == -15 ]]
+[[ -z "$btrfs_options" ]]
+[[ "$btrfs_options_override" == 0 ]]
+[[ "$btrfs_compression_set" == 1 && "$btrfs_compression_level_set" == 1 ]]
+
+btrfs_options_arg=$(reinstall_cmdline_serialize extra_btrfs_options 'noatime,compress=zstd:-15')
+printf '%s\n' "root=/dev/vda $filesystem_arg $btrfs_options_arg" >"$tmpdir/btrfs-options-cmdline"
+btrfs_compression=zstd
+btrfs_compression_level=
+btrfs_options=
+btrfs_options_override=0
+btrfs_compression_set=0
+btrfs_compression_level_set=0
+reinstall_cmdline_load_file "$tmpdir/btrfs-options-cmdline" extra
+[[ "$filesystem" == btrfs ]]
+[[ "$btrfs_options" == 'noatime,compress=zstd:-15' ]]
+[[ "$btrfs_options_override" == 1 ]]
+if reinstall_cmdline_load_file "$tmpdir/cmdline" extra; then
+    printf 'accepted mutually exclusive typed and generic Btrfs options\n' >&2
+    exit 1
+fi
+for invalid_target in 'oracle 10 default' 'debian 13 ueK' 'debian 13 default/evil'; do
+    read -r target_distro target_release target_variant <<<"$invalid_target"
+    btrfs_target_distro=
+    btrfs_target_releasever=
+    btrfs_target_kernel_variant=
+    target_payload='root=/dev/vda'
+    target_payload+=" $(reinstall_cmdline_serialize extra_btrfs_target_distro "$target_distro")"
+    target_payload+=" $(reinstall_cmdline_serialize extra_btrfs_target_releasever "$target_release")"
+    target_payload+=" $(reinstall_cmdline_serialize extra_btrfs_target_kernel_variant "$target_variant")"
+    printf '%s\n' "$target_payload" >"$tmpdir/invalid-btrfs-target"
+    if reinstall_cmdline_load_file "$tmpdir/invalid-btrfs-target" extra; then
+        printf 'accepted unsafe/inconsistent Btrfs target identity: %s\n' "$invalid_target" >&2
+        exit 1
+    fi
+done
+btrfs_target_distro=
+btrfs_target_releasever=
+btrfs_target_kernel_variant=
+target_payload='root=/dev/vda'
+target_payload+=" $(reinstall_cmdline_serialize extra_btrfs_target_distro arch)"
+target_payload+=" $(reinstall_cmdline_serialize extra_btrfs_target_kernel_variant default)"
+printf '%s\n' "$target_payload" >"$tmpdir/btrfs-target-without-release"
+reinstall_cmdline_load_file "$tmpdir/btrfs-target-without-release" extra
+[[ "$btrfs_target_distro" == arch ]]
+[[ -z "$btrfs_target_releasever" ]]
+[[ "$btrfs_target_kernel_variant" == default ]]
+btrfs_target_distro=
+btrfs_target_releasever=
+btrfs_target_kernel_variant=
 [[ ! -e "$marker" ]]
 printf 'CHECKPOINT cmdline/extra-roundtrip: filesystem=%s username=preserved command-sentinel=absent\n' "$filesystem"
 

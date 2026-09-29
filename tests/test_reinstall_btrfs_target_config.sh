@@ -3,6 +3,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo_root/lib/reinstall-btrfs-layout.sh"
+. "$repo_root/lib/reinstall-cmdline.sh"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -87,6 +88,20 @@ reinstall_btrfs_write_fstab "$mounts_only_target" "$root_uuid" @ @boot compress=
     "UUID=$root_uuid / btrfs defaults,compress=zstd,subvol=@ 0 0
 UUID=$root_uuid /boot btrfs defaults,compress=zstd,subvol=@boot 0 0" ]
 
+no_compression_target="$tmpdir/no-compression-target"
+mkdir -p "$no_compression_target/etc"
+reinstall_btrfs_write_fstab "$no_compression_target" "$root_uuid" @ @boot ''
+[ "$(cat "$no_compression_target/etc/fstab")" = \
+    "UUID=$root_uuid / btrfs defaults,subvol=@ 0 0
+UUID=$root_uuid /boot btrfs defaults,subvol=@boot 0 0" ]
+
+custom_target="$tmpdir/custom-target"
+mkdir -p "$custom_target/etc"
+reinstall_btrfs_write_fstab "$custom_target" "$root_uuid" @ @boot 'compress=zlib:9,noatime'
+[ "$(cat "$custom_target/etc/fstab")" = \
+    "UUID=$root_uuid / btrfs defaults,compress=zlib:9,noatime,subvol=@ 0 0
+UUID=$root_uuid /boot btrfs defaults,compress=zlib:9,noatime,subvol=@boot 0 0" ]
+
 expected_nixos=$(cat <<'EOF'
 boot.supportedFilesystems = [ "btrfs" ];
 boot.initrd.supportedFilesystems = [ "btrfs" ];
@@ -97,11 +112,30 @@ EOF
 )
 [ "$(reinstall_btrfs_nixos_config_snippet @ @boot compress=zstd)" = "$expected_nixos" ]
 [ "$(reinstall_btrfs_kernel_rootflags @ compress=zstd)" = 'rootflags=subvol=@,compress=zstd' ]
+[ "$(reinstall_btrfs_nixos_config_snippet @ @boot '')" = "$(cat <<'EOF'
+boot.supportedFilesystems = [ "btrfs" ];
+boot.initrd.supportedFilesystems = [ "btrfs" ];
+environment.systemPackages = [ pkgs.btrfs-progs ];
+fileSystems."/".options = lib.mkForce [ "subvol=@" ];
+fileSystems."/boot".options = lib.mkForce [ "subvol=@boot" ];
+EOF
+)" ]
+[ "$(reinstall_btrfs_nixos_config_snippet @ @boot 'compress=zlib:9,noatime')" = "$(cat <<'EOF'
+boot.supportedFilesystems = [ "btrfs" ];
+boot.initrd.supportedFilesystems = [ "btrfs" ];
+environment.systemPackages = [ pkgs.btrfs-progs ];
+fileSystems."/".options = lib.mkForce [ "subvol=@" "compress=zlib:9" "noatime" ];
+fileSystems."/boot".options = lib.mkForce [ "subvol=@boot" "compress=zlib:9" "noatime" ];
+EOF
+)" ]
+[ "$(reinstall_btrfs_kernel_rootflags @ '')" = 'rootflags=subvol=@' ]
+[ "$(reinstall_btrfs_kernel_rootflags @ 'compress=zlib:9,noatime')" = 'rootflags=subvol=@,compress=zlib:9,noatime' ]
 [ "$(reinstall_btrfs_nixos_add_initrd_module 'virtio_pci virtio_blk')" = 'virtio_pci virtio_blk btrfs' ]
 [ "$(reinstall_btrfs_nixos_add_initrd_module 'virtio_pci btrfs virtio_blk')" = 'virtio_pci btrfs virtio_blk' ]
 printf 'CHECKPOINT btrfs-config/nixos-config:\n'
 printf '%s\n' "$expected_nixos" | sed 's/^/  | /'
 printf '  | %s\n' "$(reinstall_btrfs_kernel_rootflags @ compress=zstd)"
+printf 'CHECKPOINT btrfs-config/options: none and custom compression persisted consistently in fstab, NixOS and rootflags\n'
 if command -v nix-instantiate >/dev/null 2>&1; then
     {
         printf '{ lib, pkgs, ... }: {\n'
